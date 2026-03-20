@@ -38,17 +38,25 @@ A Go-based asynchronous S3 sync CLI for Windows and Linux.
 - skipped
 
 ## Async model
-The first MVP uses a local async submission model:
+The current MVP uses a local async submission model with a queue-aware worker path:
 - CLI creates a task record
 - CLI scans the source and persists file-level task items
-- CLI can execute in foreground or async-submission mode
-- Task metadata is persisted to SQLite
-- Later daemonization can reuse the same task store and state machine
+- `sync --async` submits the task and launches a detached worker process for that task
+- `task worker` can run once or poll the queue as a lightweight supervisor loop
+- worker mode atomically claims the oldest queued task from SQLite before executing it
+- task metadata and item metadata are persisted to SQLite for later inspection and retry
 
 ## Persistence
 SQLite database stores:
 - tasks
 - task_items
+
+Persisted execution metadata now includes:
+- task summary counters (pending/uploading/success/failed/skipped)
+- task started/completed timestamps
+- task last error string
+- per-item attempt counts
+- per-item started/completed timestamps
 
 No AWS secret material is persisted.
 
@@ -66,9 +74,9 @@ No AWS secret material is persisted.
 - Keep mirror/delete semantics out of MVP
 
 ## Future extensions
-- background daemon
+- installable background daemon/service
 - multipart upload and resume
-- task item progress updates
+- byte-level task item progress updates
 - MinIO-compatible mode
 - rate limiting
 - checksums and manifests

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -12,13 +13,14 @@ import (
 )
 
 type Client struct {
-	s3     *s3.Client
-	dryRun bool
+	s3      *s3.Client
+	dryRun  bool
+	timeout time.Duration
 }
 
 func New(ctx context.Context, cfg cfgpkg.Config) (*Client, error) {
 	if cfg.Security.DryRun || cfg.Bucket == "" {
-		return &Client{dryRun: true}, nil
+		return &Client{dryRun: true, timeout: 30 * time.Second}, nil
 	}
 
 	loadOptions := []func(*awsconfig.LoadOptions) error{}
@@ -34,16 +36,19 @@ func New(ctx context.Context, cfg cfgpkg.Config) (*Client, error) {
 		return nil, fmt.Errorf("load aws config: %w", err)
 	}
 
-	return &Client{s3: s3.NewFromConfig(awsCfg), dryRun: false}, nil
+	return &Client{s3: s3.NewFromConfig(awsCfg), dryRun: false, timeout: 30 * time.Second}, nil
 }
 
-func (c *Client) UploadFile(ctx context.Context, bucket string, key string, localPath string) error {
+func (c *Client) UploadFile(bucket string, key string, localPath string) error {
 	if bucket == "" || key == "" {
 		return fmt.Errorf("bucket and key are required")
 	}
 	if c.dryRun || c.s3 == nil {
 		return nil
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
 
 	file, err := os.Open(localPath)
 	if err != nil {

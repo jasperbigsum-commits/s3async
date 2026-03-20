@@ -3,7 +3,10 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"path/filepath"
+	"os"
+	"os/exec"
+	"runtime"
+	"syscall"
 	"time"
 
 	"github.com/jasperbigsum-commits/s3async/internal/app"
@@ -81,26 +84,24 @@ func newSyncCmd() *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "status: %s\n", createdTask.Status)
 			fmt.Fprintf(cmd.OutOrStdout(), "planned items: %d\n", len(items))
 
-			if async || len(items) == 0 {
+			if len(items) == 0 {
+				if err := service.CompleteTaskIfEmpty(createdTask.ID); err != nil {
+					return fmt.Errorf("complete empty task: %w", err)
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), "task completed immediately: no matching files")
 				return nil
 			}
 
-			uploaderClient, err := uploader.New(context.Background(), bootstrap.Config)
-			if err != nil {
-				return fmt.Errorf("create uploader client: %w", err)
+			if async {
+				if err := spawnBackgroundRunner(createdTask.ID, configPath); err != nil {
+					return fmt.Errorf("spawn background runner: %w", err)
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), "background runner started")
+				return nil
 			}
-			for _, item := range items {
-				key := item.RelativePath
-				if resolvedPrefix != "" {
-					key = filepath.ToSlash(filepath.Join(resolvedPrefix, item.RelativePath))
-				}
 
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				err = uploaderClient.UploadFile(ctx, resolvedBucket, key, item.Path)
-				cancel()
-				if err != nil {
-					return fmt.Errorf("upload file %s: %w", item.Path, err)
-				}
+			if err := runTaskOnce(createdTask.ID, configPath); err != nil {
+				return fmt.Errorf("run task: %w", err)
 			}
 
 			fmt.Fprintln(cmd.OutOrStdout(), "foreground upload completed")
@@ -116,4 +117,97 @@ func newSyncCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&exclude, "exclude", nil, "Exclude glob patterns")
 
 	return cmd
+}
+
+func runTaskOnce(taskID string, configPath string) error {
+	bootstrap, uploaderClient, execCfg, err := buildExecutionDeps(configPath)
+	if err != nil {
+		return err
+	}
+
+	return bootstrap.TaskService.ExecuteTask(taskID, uploaderClient, execCfg)
+}
+
+func runWorkerLoop(cmd *cobra.Command, configPath string, once bool, pollInterval time.Duration, idleTimeout time.Duration) error {
+	if pollInterval <= 0 {
+		pollInterval = 2 * time.Second
+	}
+
+	bootstrap, uploaderClient, execCfg, err := buildExecutionDeps(configPath)
+	if err != nil {
+		return err
+	}
+
+	startedAt := time.Now()
+	lastWorkAt := startedAt
+	for {
+		executedTask, ok, err := bootstrap.TaskService.ExecuteNextQueuedTask(uploaderClient, execCfg)
+		if err != nil {
+			return fmt.Errorf("execute next queued task: %w", err)
+		}
+		if ok {
+			fmt.Fprintf(cmd.OutOrStdout(), "worker executed task: %s (%s)\n", executedTask.ID, executedTask.Status)
+			lastWorkAt = time.Now()
+			if once {
+				return nil
+			}
+			continue
+		}
+
+		if once {
+			fmt.Fprintln(cmd.OutOrStdout(), "worker found no queued tasks")
+			return nil
+		}
+		if idleTimeout > 0 && time.Since(lastWorkAt) >= idleTimeout {
+			fmt.Fprintf(cmd.OutOrStdout(), "worker idle timeout reached after %s\n", time.Since(startedAt).Round(time.Second))
+			return nil
+		}
+		time.Sleep(pollInterval)
+	}
+}
+
+func buildExecutionDeps(configPath string) (*app.Bootstrap, *uploader.Client, task.ExecutionConfig, error) {
+	bootstrap, err := app.NewBootstrapWithConfig(configPath)
+	if err != nil {
+		return nil, nil, task.ExecutionConfig{}, fmt.Errorf("create bootstrap: %w", err)
+	}
+
+	uploaderClient, err := uploader.New(context.Background(), bootstrap.Config)
+	if err != nil {
+		return nil, nil, task.ExecutionConfig{}, fmt.Errorf("create uploader client: %w", err)
+	}
+
+	execCfg := task.ExecutionConfig{
+		Workers:     bootstrap.Config.Workers,
+		MaxAttempts: bootstrap.Config.Retry.MaxAttempts,
+		Backoff:     time.Duration(bootstrap.Config.Retry.BackoffMS) * time.Millisecond,
+	}
+	return bootstrap, uploaderClient, execCfg, nil
+}
+
+func spawnBackgroundRunner(taskID string, configPath string) error {
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable path: %w", err)
+	}
+
+	args := []string{"task", "worker", "--task-id", taskID}
+	if configPath != "" {
+		args = append(args, "--config", configPath)
+	}
+
+	proc := exec.Command(exePath, args...)
+	proc.Stdout = nil
+	proc.Stderr = nil
+	proc.Stdin = nil
+
+	if runtime.GOOS != "windows" {
+		proc.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
+
+	if err := proc.Start(); err != nil {
+		return fmt.Errorf("start process: %w", err)
+	}
+
+	return proc.Process.Release()
 }

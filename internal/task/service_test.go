@@ -2,7 +2,10 @@ package task
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	"testing"
+	"time"
 )
 
 type memoryRepo struct {
@@ -25,6 +28,9 @@ func (m *memoryRepo) List() ([]Task, error) {
 	for _, item := range m.items {
 		result = append(result, item)
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt.After(result[j].CreatedAt)
+	})
 	return result, nil
 }
 
@@ -46,7 +52,97 @@ func (m *memoryRepo) UpdateStatus(id string, status Status) error {
 		return fmt.Errorf("task not found: %s", id)
 	}
 	item.Status = status
+	item.UpdatedAt = time.Now().UTC()
 	m.items[id] = item
+	return nil
+}
+
+func (m *memoryRepo) UpdateTask(task Task) error {
+	if _, ok := m.items[task.ID]; !ok {
+		return fmt.Errorf("task not found: %s", task.ID)
+	}
+	m.items[task.ID] = task
+	return nil
+}
+
+func (m *memoryRepo) UpdateItemStatus(taskID string, relativePath string, status ItemStatus, errMsg string) error {
+	items := m.itemIndex[taskID]
+	now := time.Now().UTC()
+	for i := range items {
+		if items[i].RelativePath != relativePath {
+			continue
+		}
+		items[i].Status = status
+		items[i].Error = errMsg
+		items[i].UpdatedAt = now
+		switch status {
+		case ItemStatusUploading:
+			items[i].AttemptCount++
+			if items[i].StartedAt == nil {
+				items[i].StartedAt = &now
+			}
+			items[i].CompletedAt = nil
+		case ItemStatusSuccess, ItemStatusFailed, ItemStatusSkipped:
+			items[i].CompletedAt = &now
+		}
+		m.itemIndex[taskID] = items
+		return nil
+	}
+	return fmt.Errorf("task item not found: %s/%s", taskID, relativePath)
+}
+
+func (m *memoryRepo) ResetItemsForRetry(taskID string) error {
+	items := m.itemIndex[taskID]
+	for i := range items {
+		if items[i].Status == ItemStatusFailed {
+			items[i].Status = ItemStatusPending
+			items[i].Error = ""
+			items[i].AttemptCount = 0
+			items[i].StartedAt = nil
+			items[i].CompletedAt = nil
+		}
+	}
+	m.itemIndex[taskID] = items
+	return nil
+}
+
+func (m *memoryRepo) ClaimNextQueued() (Task, bool, error) {
+	var best *Task
+	for _, item := range m.items {
+		candidate := item
+		if candidate.Status != StatusQueued {
+			continue
+		}
+		if best == nil || candidate.CreatedAt.Before(best.CreatedAt) {
+			best = &candidate
+		}
+	}
+	if best == nil {
+		return Task{}, false, nil
+	}
+	now := time.Now().UTC()
+	best.Status = StatusRunning
+	best.UpdatedAt = now
+	if best.StartedAt == nil {
+		best.StartedAt = &now
+	}
+	best.CompletedAt = nil
+	best.LastError = ""
+	m.items[best.ID] = *best
+	return *best, true, nil
+}
+
+type fakeUploader struct {
+	failures map[string]int
+	calls    []string
+}
+
+func (f *fakeUploader) UploadFile(bucket string, key string, localPath string) error {
+	f.calls = append(f.calls, key)
+	if remaining := f.failures[key]; remaining > 0 {
+		f.failures[key] = remaining - 1
+		return fmt.Errorf("forced upload failure for %s", key)
+	}
 	return nil
 }
 
@@ -99,14 +195,31 @@ func TestCreateTaskPersistsItems(t *testing.T) {
 	if items[0].Status != ItemStatusPending {
 		t.Fatalf("ListTaskItems() status = %s, want %s", items[0].Status, ItemStatusPending)
 	}
+	if createdTask.TotalItems != 1 || createdTask.PendingItems != 1 {
+		t.Fatalf("CreateTask() summary = %+v, want total=1 pending=1", createdTask)
+	}
 }
 
 func TestRetryTask(t *testing.T) {
 	repo := newMemoryRepo()
 	service := NewService(repo)
-	createdTask, err := service.CreateTask("./data", "bucket", "prefix", false, nil)
+	createdTask, err := service.CreateTask("./data", "bucket", "prefix", false, []Item{{Path: "a.txt", RelativePath: "a.txt", Size: 1, Status: ItemStatusFailed, Error: "boom"}})
 	if err != nil {
 		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	now := time.Now().UTC()
+	createdTask.Status = StatusFailed
+	createdTask.LastError = "boom"
+	createdTask.StartedAt = &now
+	createdTask.CompletedAt = &now
+	createdTask.PendingItems = 0
+	createdTask.FailedItems = 1
+	if err := repo.UpdateTask(createdTask); err != nil {
+		t.Fatalf("UpdateTask() error = %v", err)
+	}
+	if err := repo.UpdateItemStatus(createdTask.ID, "a.txt", ItemStatusFailed, "boom"); err != nil {
+		t.Fatalf("UpdateItemStatus() error = %v", err)
 	}
 
 	if err := service.RetryTask(createdTask.ID); err != nil {
@@ -120,5 +233,207 @@ func TestRetryTask(t *testing.T) {
 
 	if got.Status != StatusQueued {
 		t.Fatalf("GetTask() status after retry = %s, want %s", got.Status, StatusQueued)
+	}
+	if got.LastError != "" {
+		t.Fatalf("GetTask() last error after retry = %q, want empty", got.LastError)
+	}
+	if got.StartedAt != nil || got.CompletedAt != nil {
+		t.Fatalf("GetTask() timestamps after retry = started:%v completed:%v, want nil", got.StartedAt, got.CompletedAt)
+	}
+
+	items, err := service.ListTaskItems(createdTask.ID)
+	if err != nil {
+		t.Fatalf("ListTaskItems() error = %v", err)
+	}
+	if items[0].Status != ItemStatusPending {
+		t.Fatalf("item status after retry = %s, want %s", items[0].Status, ItemStatusPending)
+	}
+	if items[0].Error != "" {
+		t.Fatalf("item error after retry = %q, want empty", items[0].Error)
+	}
+	if items[0].AttemptCount != 0 {
+		t.Fatalf("item attempts after retry = %d, want 0", items[0].AttemptCount)
+	}
+}
+
+func TestExecuteTaskSuccess(t *testing.T) {
+	repo := newMemoryRepo()
+	service := NewService(repo)
+	createdTask, err := service.CreateTask("./data", "bucket", "backup", true, []Item{
+		{Path: "a.txt", RelativePath: "a.txt", Size: 1},
+		{Path: "b.txt", RelativePath: "sub/b.txt", Size: 2},
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	uploader := &fakeUploader{failures: map[string]int{}}
+	if err := service.ExecuteTask(createdTask.ID, uploader, ExecutionConfig{Workers: 2, MaxAttempts: 1}); err != nil {
+		t.Fatalf("ExecuteTask() error = %v", err)
+	}
+
+	got, err := service.GetTask(createdTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if got.Status != StatusCompleted {
+		t.Fatalf("task status = %s, want %s", got.Status, StatusCompleted)
+	}
+	if got.StartedAt == nil || got.CompletedAt == nil {
+		t.Fatalf("task timestamps = started:%v completed:%v, want both set", got.StartedAt, got.CompletedAt)
+	}
+	if got.SuccessItems != 2 || got.FailedItems != 0 || got.PendingItems != 0 {
+		t.Fatalf("task summary = %+v, want success=2 failed=0 pending=0", got)
+	}
+
+	items, err := service.ListTaskItems(createdTask.ID)
+	if err != nil {
+		t.Fatalf("ListTaskItems() error = %v", err)
+	}
+	for _, item := range items {
+		if item.Status != ItemStatusSuccess {
+			t.Fatalf("item %s status = %s, want %s", item.RelativePath, item.Status, ItemStatusSuccess)
+		}
+		if item.AttemptCount != 1 {
+			t.Fatalf("item %s attempts = %d, want 1", item.RelativePath, item.AttemptCount)
+		}
+		if item.StartedAt == nil || item.CompletedAt == nil {
+			t.Fatalf("item %s timestamps = started:%v completed:%v, want both set", item.RelativePath, item.StartedAt, item.CompletedAt)
+		}
+	}
+	if len(uploader.calls) != 2 {
+		t.Fatalf("upload calls = %d, want 2", len(uploader.calls))
+	}
+}
+
+func TestExecuteTaskPartialFailure(t *testing.T) {
+	repo := newMemoryRepo()
+	service := NewService(repo)
+	createdTask, err := service.CreateTask("./data", "bucket", "", true, []Item{
+		{Path: "a.txt", RelativePath: "a.txt", Size: 1},
+		{Path: "b.txt", RelativePath: "b.txt", Size: 2},
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	uploader := &fakeUploader{failures: map[string]int{"b.txt": 1}}
+	if err := service.ExecuteTask(createdTask.ID, uploader, ExecutionConfig{Workers: 2, MaxAttempts: 1}); err != nil {
+		t.Fatalf("ExecuteTask() error = %v", err)
+	}
+
+	got, err := service.GetTask(createdTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if got.Status != StatusPartialFailed {
+		t.Fatalf("task status = %s, want %s", got.Status, StatusPartialFailed)
+	}
+	if !strings.Contains(got.LastError, "forced upload failure") {
+		t.Fatalf("task last error = %q, want forced upload failure", got.LastError)
+	}
+	if got.SuccessItems != 1 || got.FailedItems != 1 {
+		t.Fatalf("task summary = %+v, want success=1 failed=1", got)
+	}
+
+	items, err := service.ListTaskItems(createdTask.ID)
+	if err != nil {
+		t.Fatalf("ListTaskItems() error = %v", err)
+	}
+
+	var sawFailure bool
+	for _, item := range items {
+		if item.RelativePath == "b.txt" {
+			sawFailure = true
+			if item.Status != ItemStatusFailed {
+				t.Fatalf("failed item status = %s, want %s", item.Status, ItemStatusFailed)
+			}
+			if item.AttemptCount != 1 {
+				t.Fatalf("failed item attempts = %d, want 1", item.AttemptCount)
+			}
+			if !strings.Contains(item.Error, "forced upload failure") {
+				t.Fatalf("failed item error = %q, want forced upload failure", item.Error)
+			}
+		}
+	}
+	if !sawFailure {
+		t.Fatal("expected to see failed item b.txt")
+	}
+}
+
+func TestExecuteTaskRetriesThenSucceeds(t *testing.T) {
+	repo := newMemoryRepo()
+	service := NewService(repo)
+	createdTask, err := service.CreateTask("./data", "bucket", "prefix", true, []Item{{Path: "a.txt", RelativePath: "a.txt", Size: 1}})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	uploader := &fakeUploader{failures: map[string]int{"prefix/a.txt": 1}}
+	if err := service.ExecuteTask(createdTask.ID, uploader, ExecutionConfig{Workers: 1, MaxAttempts: 2}); err != nil {
+		t.Fatalf("ExecuteTask() error = %v", err)
+	}
+
+	got, err := service.GetTask(createdTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if got.Status != StatusCompleted {
+		t.Fatalf("task status = %s, want %s", got.Status, StatusCompleted)
+	}
+
+	items, err := service.ListTaskItems(createdTask.ID)
+	if err != nil {
+		t.Fatalf("ListTaskItems() error = %v", err)
+	}
+	if items[0].Status != ItemStatusSuccess {
+		t.Fatalf("item status = %s, want %s", items[0].Status, ItemStatusSuccess)
+	}
+	if items[0].AttemptCount != 2 {
+		t.Fatalf("item attempts = %d, want 2", items[0].AttemptCount)
+	}
+	if len(uploader.calls) != 2 {
+		t.Fatalf("upload calls = %d, want 2", len(uploader.calls))
+	}
+}
+
+func TestExecuteNextQueuedTaskClaimsOldestQueued(t *testing.T) {
+	repo := newMemoryRepo()
+	service := NewService(repo)
+	first, err := service.CreateTask("./first", "bucket", "", true, []Item{{Path: "a.txt", RelativePath: "a.txt", Size: 1}})
+	if err != nil {
+		t.Fatalf("CreateTask(first) error = %v", err)
+	}
+	time.Sleep(time.Millisecond)
+	second, err := service.CreateTask("./second", "bucket", "", true, []Item{{Path: "b.txt", RelativePath: "b.txt", Size: 1}})
+	if err != nil {
+		t.Fatalf("CreateTask(second) error = %v", err)
+	}
+
+	uploader := &fakeUploader{failures: map[string]int{}}
+	executed, ok, err := service.ExecuteNextQueuedTask(uploader, ExecutionConfig{Workers: 1, MaxAttempts: 1})
+	if err != nil {
+		t.Fatalf("ExecuteNextQueuedTask() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("ExecuteNextQueuedTask() ok = false, want true")
+	}
+	if executed.ID != first.ID {
+		t.Fatalf("ExecuteNextQueuedTask() claimed %s, want %s", executed.ID, first.ID)
+	}
+
+	firstTask, err := service.GetTask(first.ID)
+	if err != nil {
+		t.Fatalf("GetTask(first) error = %v", err)
+	}
+	if firstTask.Status != StatusCompleted {
+		t.Fatalf("first task status = %s, want %s", firstTask.Status, StatusCompleted)
+	}
+	secondTask, err := service.GetTask(second.ID)
+	if err != nil {
+		t.Fatalf("GetTask(second) error = %v", err)
+	}
+	if secondTask.Status != StatusQueued {
+		t.Fatalf("second task status = %s, want %s", secondTask.Status, StatusQueued)
 	}
 }

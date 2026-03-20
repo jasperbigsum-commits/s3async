@@ -6,8 +6,9 @@
 - Async sync task creation
 - SQLite persistence for tasks and task items
 - Source directory scan with include/exclude filtering
-- Foreground or async task submission flow
-- Dry-run aware uploader structure for AWS SDK v2 expansion
+- Foreground execution and queue-aware background worker flow
+- File-level status, attempt, and timestamp updates during uploads
+- Retry-aware execution pipeline for queued tasks
 - Configuration loading via config file and environment variables
 - Validation command with actionable environment output
 
@@ -17,6 +18,8 @@ s3async sync <source>
 s3async task list
 s3async task status <task-id>
 s3async task retry <task-id>
+s3async task run <task-id>
+s3async task worker
 s3async validate
 s3async version
 ```
@@ -25,6 +28,9 @@ s3async version
 ```bash
 go run . sync ./data --bucket my-bucket --prefix backup/ --async
 go run . sync ./data --config examples/config.yaml --async=false
+go run . task worker --once
+go run . task worker --poll-interval 2s --idle-timeout 30s
+go run . task status <task-id> --failed-limit 20
 go run . validate --config examples/config.yaml
 ```
 
@@ -40,12 +46,14 @@ Supported configuration sources:
 ## Documentation
 - `docs/design.md`
 - `docs/mvp-plan.md`
+- `docs/work-log.md`
+- `docs/change-log.md`
 
 ## Security
 - Do not persist AWS secrets in task storage.
 - Prefer environment variables, AWS profile, or IAM role.
 - Add least-privilege IAM policies for S3 access.
-- Dry-run mode can be used to verify scan and planning logic safely.
+- Dry-run mode can be used to verify scan, planning, and execution logic safely.
 
 ## Development
 ```bash
@@ -56,8 +64,8 @@ go test -cover ./...
 ```
 
 ## Current TODOs
-- background worker execution for async tasks
-- richer task item status updates during uploads
+- convert detached worker launch into a first-class long-running daemon/service install mode
 - multipart upload and resume
-- retry/backoff policy execution
+- retry jitter and selective retry policies
 - MinIO and compatible S3 endpoints
+- structured execution logs and self-audit checklist automation

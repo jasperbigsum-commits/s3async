@@ -16,6 +16,7 @@
 - `task worker` supervisor command for one-shot or polling queue execution.
 - SQLite-backed queued task claiming for supervisor / worker flows.
 - SQLite tests covering richer task/item metrics persistence and queue claiming.
+- Focused task service tests covering repository failure propagation during per-item execution updates.
 
 ### Changed
 - Sync command now plans file items before creating tasks.
@@ -27,6 +28,7 @@
 - Task/task-item persistence now stores summary counters, last error, attempt counts, and execution timestamps.
 - `task list` and `task status` now expose richer observability, timestamps, and failed item details.
 - Async background execution now launches queue-aware worker mode instead of only a raw `task run` subprocess.
+- Task execution now fails fast when repository updates for item/task progress cannot be persisted.
 
 ### Pending
 - Dedicated installable background daemon / service mode.

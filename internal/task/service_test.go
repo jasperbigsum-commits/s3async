@@ -4,13 +4,17 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 type memoryRepo struct {
-	items     map[string]Task
-	itemIndex map[string][]Item
+	mu                 sync.Mutex
+	items              map[string]Task
+	itemIndex          map[string][]Item
+	failUpdateTask     bool
+	failUpdateItemPath string
 }
 
 func newMemoryRepo() *memoryRepo {
@@ -18,12 +22,16 @@ func newMemoryRepo() *memoryRepo {
 }
 
 func (m *memoryRepo) Create(task Task, items []Item) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.items[task.ID] = task
 	m.itemIndex[task.ID] = append([]Item(nil), items...)
 	return nil
 }
 
 func (m *memoryRepo) List() ([]Task, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	result := make([]Task, 0, len(m.items))
 	for _, item := range m.items {
 		result = append(result, item)
@@ -35,6 +43,8 @@ func (m *memoryRepo) List() ([]Task, error) {
 }
 
 func (m *memoryRepo) Get(id string) (Task, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	item, ok := m.items[id]
 	if !ok {
 		return Task{}, fmt.Errorf("task not found: %s", id)
@@ -43,10 +53,14 @@ func (m *memoryRepo) Get(id string) (Task, error) {
 }
 
 func (m *memoryRepo) ListItems(taskID string) ([]Item, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return append([]Item(nil), m.itemIndex[taskID]...), nil
 }
 
 func (m *memoryRepo) UpdateStatus(id string, status Status) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	item, ok := m.items[id]
 	if !ok {
 		return fmt.Errorf("task not found: %s", id)
@@ -58,6 +72,11 @@ func (m *memoryRepo) UpdateStatus(id string, status Status) error {
 }
 
 func (m *memoryRepo) UpdateTask(task Task) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failUpdateTask {
+		return fmt.Errorf("forced UpdateTask failure")
+	}
 	if _, ok := m.items[task.ID]; !ok {
 		return fmt.Errorf("task not found: %s", task.ID)
 	}
@@ -66,6 +85,11 @@ func (m *memoryRepo) UpdateTask(task Task) error {
 }
 
 func (m *memoryRepo) UpdateItemStatus(taskID string, relativePath string, status ItemStatus, errMsg string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failUpdateItemPath != "" && m.failUpdateItemPath == relativePath {
+		return fmt.Errorf("forced UpdateItemStatus failure for %s", relativePath)
+	}
 	items := m.itemIndex[taskID]
 	now := time.Now().UTC()
 	for i := range items {
@@ -92,6 +116,8 @@ func (m *memoryRepo) UpdateItemStatus(taskID string, relativePath string, status
 }
 
 func (m *memoryRepo) ResetItemsForRetry(taskID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	items := m.itemIndex[taskID]
 	for i := range items {
 		if items[i].Status == ItemStatusFailed {
@@ -107,6 +133,8 @@ func (m *memoryRepo) ResetItemsForRetry(taskID string) error {
 }
 
 func (m *memoryRepo) ClaimNextQueued() (Task, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	var best *Task
 	for _, item := range m.items {
 		candidate := item
@@ -133,11 +161,14 @@ func (m *memoryRepo) ClaimNextQueued() (Task, bool, error) {
 }
 
 type fakeUploader struct {
+	mu       sync.Mutex
 	failures map[string]int
 	calls    []string
 }
 
 func (f *fakeUploader) UploadFile(bucket string, key string, localPath string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, key)
 	if remaining := f.failures[key]; remaining > 0 {
 		f.failures[key] = remaining - 1
@@ -394,6 +425,42 @@ func TestExecuteTaskRetriesThenSucceeds(t *testing.T) {
 	}
 	if len(uploader.calls) != 2 {
 		t.Fatalf("upload calls = %d, want 2", len(uploader.calls))
+	}
+}
+
+func TestExecuteTaskReturnsErrorWhenUpdateItemStatusFails(t *testing.T) {
+	repo := newMemoryRepo()
+	repo.failUpdateItemPath = "a.txt"
+	service := NewService(repo)
+	createdTask, err := service.CreateTask("./data", "bucket", "", true, []Item{{Path: "a.txt", RelativePath: "a.txt", Size: 1}})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	err = service.ExecuteTask(createdTask.ID, &fakeUploader{failures: map[string]int{}}, ExecutionConfig{Workers: 1, MaxAttempts: 1})
+	if err == nil {
+		t.Fatal("ExecuteTask() error = nil, want failure")
+	}
+	if !strings.Contains(err.Error(), "forced UpdateItemStatus failure") {
+		t.Fatalf("ExecuteTask() error = %v, want UpdateItemStatus failure", err)
+	}
+}
+
+func TestExecuteTaskReturnsErrorWhenProgressPersistenceFails(t *testing.T) {
+	repo := newMemoryRepo()
+	service := NewService(repo)
+	createdTask, err := service.CreateTask("./data", "bucket", "", true, []Item{{Path: "a.txt", RelativePath: "a.txt", Size: 1}})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	repo.failUpdateTask = true
+	err = service.ExecuteTask(createdTask.ID, &fakeUploader{failures: map[string]int{}}, ExecutionConfig{Workers: 1, MaxAttempts: 1})
+	if err == nil {
+		t.Fatal("ExecuteTask() error = nil, want failure")
+	}
+	if !strings.Contains(err.Error(), "forced UpdateTask failure") {
+		t.Fatalf("ExecuteTask() error = %v, want UpdateTask failure", err)
 	}
 }
 

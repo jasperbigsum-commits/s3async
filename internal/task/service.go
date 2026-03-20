@@ -225,17 +225,39 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 	}
 
 	var mu sync.Mutex
-	workCh := make(chan Item)
+	var executionErrMu sync.Mutex
+	var executionErr error
+	workCh := make(chan Item, len(items))
 	var wg sync.WaitGroup
 
-	persistProgress := func() {
+	setExecutionErr := func(err error) {
+		if err == nil {
+			return
+		}
+		executionErrMu.Lock()
+		defer executionErrMu.Unlock()
+		if executionErr == nil {
+			executionErr = err
+		}
+	}
+
+	getExecutionErr := func() error {
+		executionErrMu.Lock()
+		defer executionErrMu.Unlock()
+		return executionErr
+	}
+
+	persistProgress := func() error {
 		t.UpdatedAt = time.Now().UTC()
 		ApplySummary(&t, BuildSummary(items))
 		t.LastError = latestError(items)
-		_ = s.repo.UpdateTask(t)
+		if err := s.repo.UpdateTask(t); err != nil {
+			return fmt.Errorf("update task progress: %w", err)
+		}
+		return nil
 	}
 
-	updateLocalItem := func(relativePath string, status ItemStatus, errMsg string) {
+	updateLocalItem := func(relativePath string, status ItemStatus, errMsg string) error {
 		mu.Lock()
 		defer mu.Unlock()
 
@@ -257,7 +279,10 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 			}
 			break
 		}
-		persistProgress()
+		if err := persistProgress(); err != nil {
+			return err
+		}
+		return nil
 	}
 
 	for i := 0; i < cfg.Workers; i++ {
@@ -265,10 +290,20 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 		go func() {
 			defer wg.Done()
 			for item := range workCh {
+				if getExecutionErr() != nil {
+					continue
+				}
+
 				var uploadErr error
 				for attempt := 1; attempt <= cfg.MaxAttempts; attempt++ {
-					_ = s.repo.UpdateItemStatus(t.ID, item.RelativePath, ItemStatusUploading, "")
-					updateLocalItem(item.RelativePath, ItemStatusUploading, "")
+					if err := s.repo.UpdateItemStatus(t.ID, item.RelativePath, ItemStatusUploading, ""); err != nil {
+						setExecutionErr(fmt.Errorf("mark item uploading %s: %w", item.RelativePath, err))
+						break
+					}
+					if err := updateLocalItem(item.RelativePath, ItemStatusUploading, ""); err != nil {
+						setExecutionErr(fmt.Errorf("persist local uploading progress %s: %w", item.RelativePath, err))
+						break
+					}
 
 					key := item.RelativePath
 					if t.Prefix != "" {
@@ -277,8 +312,13 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 
 					uploadErr = uploader.UploadFile(t.Bucket, key, item.Path)
 					if uploadErr == nil {
-						_ = s.repo.UpdateItemStatus(t.ID, item.RelativePath, ItemStatusSuccess, "")
-						updateLocalItem(item.RelativePath, ItemStatusSuccess, "")
+						if err := s.repo.UpdateItemStatus(t.ID, item.RelativePath, ItemStatusSuccess, ""); err != nil {
+							setExecutionErr(fmt.Errorf("mark item success %s: %w", item.RelativePath, err))
+							break
+						}
+						if err := updateLocalItem(item.RelativePath, ItemStatusSuccess, ""); err != nil {
+							setExecutionErr(fmt.Errorf("persist local success progress %s: %w", item.RelativePath, err))
+						}
 						break
 					}
 
@@ -287,9 +327,17 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 					}
 				}
 
+				if getExecutionErr() != nil {
+					continue
+				}
 				if uploadErr != nil {
-					_ = s.repo.UpdateItemStatus(t.ID, item.RelativePath, ItemStatusFailed, uploadErr.Error())
-					updateLocalItem(item.RelativePath, ItemStatusFailed, uploadErr.Error())
+					if err := s.repo.UpdateItemStatus(t.ID, item.RelativePath, ItemStatusFailed, uploadErr.Error()); err != nil {
+						setExecutionErr(fmt.Errorf("mark item failed %s: %w", item.RelativePath, err))
+						continue
+					}
+					if err := updateLocalItem(item.RelativePath, ItemStatusFailed, uploadErr.Error()); err != nil {
+						setExecutionErr(fmt.Errorf("persist local failed progress %s: %w", item.RelativePath, err))
+					}
 				}
 			}
 		}()
@@ -303,6 +351,20 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 	}
 	close(workCh)
 	wg.Wait()
+
+	if err := getExecutionErr(); err != nil {
+		finalItems, listErr := s.repo.ListItems(t.ID)
+		if listErr == nil {
+			now := time.Now().UTC()
+			t.Status = StatusFailed
+			t.LastError = err.Error()
+			t.UpdatedAt = now
+			t.CompletedAt = &now
+			ApplySummary(&t, BuildSummary(finalItems))
+			_ = s.repo.UpdateTask(t)
+		}
+		return err
+	}
 
 	finalItems, err := s.repo.ListItems(t.ID)
 	if err != nil {

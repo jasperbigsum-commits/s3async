@@ -30,12 +30,16 @@
 - Improved `task list`/`task status` output with richer item counts, timestamps, and failed item detail output.
 - Added SQLite repository tests covering metric persistence and queued-task claiming.
 - Re-ran `go test ./...` successfully after the worker/observability changes.
+- Post-commit validation initially exposed race conditions in the concurrent task-service test doubles; fixed the test harness to be concurrency-safe and then re-ran `go test ./...`, `go test -race ./...`, `go test -cover ./internal/task ./internal/store`, and `go run . validate` successfully.
+- Hardened task execution so repository update failures during per-item progress persistence now surface as execution errors instead of being silently ignored.
+- Added focused task service tests for `UpdateItemStatus` and `UpdateTask` failure paths during execution.
 
 ### Risks / Notes
 - Current async mode now has a queue-aware worker loop, but process launch is still detach-based rather than a managed OS service/daemon install.
 - Progress metrics are state/attempt/timestamp oriented; byte-level upload progress and throughput metrics are not yet implemented.
 - Background execution currently depends on being able to relaunch the same executable.
 - Task progress counters are persisted during execution, but structured event logs are still pending.
+- Command-layer automated coverage is still minimal (`cmd` package remains uncovered), so CLI wiring regressions are still a risk.
 
 ### Next Suggested Iteration
 - Convert worker mode into a first-class installable daemon/service supervisor.

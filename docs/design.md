@@ -6,6 +6,7 @@ A Go-based asynchronous S3 sync CLI for Windows and Linux.
 ## Goals
 - Submit sync jobs without blocking the terminal
 - Persist task state locally
+- Persist file-level task items for later execution and inspection
 - Resume/retry failed work
 - Support safe credential loading
 - Scale with concurrent upload workers
@@ -13,10 +14,11 @@ A Go-based asynchronous S3 sync CLI for Windows and Linux.
 ## High-level architecture
 1. CLI layer (`cmd/`)
 2. App orchestration (`internal/app`)
-3. Task management (`internal/task`)
-4. Local persistence (`internal/store`)
-5. Scan/filter pipeline (`internal/scanner`, `internal/filter`)
-6. Upload execution (`internal/uploader`)
+3. Configuration loading (`internal/config`)
+4. Task management (`internal/task`)
+5. Local persistence (`internal/store`)
+6. Scan/filter pipeline (`internal/scanner`, `internal/filter`)
+7. Upload execution (`internal/uploader`)
 
 ## Task lifecycle
 - pending
@@ -38,6 +40,7 @@ A Go-based asynchronous S3 sync CLI for Windows and Linux.
 ## Async model
 The first MVP uses a local async submission model:
 - CLI creates a task record
+- CLI scans the source and persists file-level task items
 - CLI can execute in foreground or async-submission mode
 - Task metadata is persisted to SQLite
 - Later daemonization can reuse the same task store and state machine
@@ -49,6 +52,13 @@ SQLite database stores:
 
 No AWS secret material is persisted.
 
+## Validation model
+`validate` reports:
+- resolved database path
+- region and bucket presence
+- visible credential path hints
+- dry-run and worker settings
+
 ## Security notes
 - Resolve credentials from AWS SDK default chain
 - Use context timeouts for network calls
@@ -58,6 +68,7 @@ No AWS secret material is persisted.
 ## Future extensions
 - background daemon
 - multipart upload and resume
+- task item progress updates
 - MinIO-compatible mode
 - rate limiting
 - checksums and manifests

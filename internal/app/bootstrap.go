@@ -2,31 +2,31 @@ package app
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
+	cfgpkg "github.com/jasperbigsum-commits/s3async/internal/config"
 	"github.com/jasperbigsum-commits/s3async/internal/store"
 	"github.com/jasperbigsum-commits/s3async/internal/task"
 )
 
 type Bootstrap struct {
+	Config      cfgpkg.Config
 	TaskService *task.Service
 }
 
 func NewBootstrap() (*Bootstrap, error) {
-	databasePath := os.Getenv("S3ASYNC_DB_PATH")
-	if databasePath == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("resolve user home dir: %w", err)
-		}
-		databasePath = filepath.Join(home, ".s3async", "tasks.db")
+	return NewBootstrapWithConfig("")
+}
+
+func NewBootstrapWithConfig(configPath string) (*Bootstrap, error) {
+	cfg, err := cfgpkg.Load(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
 	}
 
-	repo, err := store.NewSQLiteTaskRepository(databasePath)
+	repo, err := store.NewSQLiteTaskRepository(cfg.DatabasePath)
 	if err != nil {
 		return nil, fmt.Errorf("create sqlite repository: %w", err)
 	}
 
-	return &Bootstrap{TaskService: task.NewService(repo)}, nil
+	return &Bootstrap{Config: cfg, TaskService: task.NewService(repo)}, nil
 }

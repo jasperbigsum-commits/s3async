@@ -6,9 +6,10 @@ import (
 )
 
 type Repository interface {
-	Create(task Task) error
+	Create(task Task, items []Item) error
 	List() ([]Task, error)
 	Get(id string) (Task, error)
+	ListItems(taskID string) ([]Item, error)
 	UpdateStatus(id string, status Status) error
 }
 
@@ -20,7 +21,7 @@ func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
 }
 
-func (s *Service) CreateTask(source string, bucket string, prefix string, async bool) (Task, error) {
+func (s *Service) CreateTask(source string, bucket string, prefix string, async bool, items []Item) (Task, error) {
 	status := StatusQueued
 	if !async {
 		status = StatusPending
@@ -38,7 +39,16 @@ func (s *Service) CreateTask(source string, bucket string, prefix string, async 
 		UpdatedAt: now,
 	}
 
-	if err := s.repo.Create(t); err != nil {
+	for i := range items {
+		items[i].TaskID = t.ID
+		items[i].CreatedAt = now
+		items[i].UpdatedAt = now
+		if items[i].Status == "" {
+			items[i].Status = ItemStatusPending
+		}
+	}
+
+	if err := s.repo.Create(t, items); err != nil {
 		return Task{}, fmt.Errorf("persist task: %w", err)
 	}
 
@@ -61,6 +71,15 @@ func (s *Service) GetTask(id string) (Task, error) {
 	}
 
 	return t, nil
+}
+
+func (s *Service) ListTaskItems(id string) ([]Item, error) {
+	items, err := s.repo.ListItems(id)
+	if err != nil {
+		return nil, fmt.Errorf("list task items from repo: %w", err)
+	}
+
+	return items, nil
 }
 
 func (s *Service) RetryTask(id string) error {

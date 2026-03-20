@@ -4,6 +4,8 @@ import "time"
 
 type Status string
 
+type ItemStatus string
+
 const (
 	StatusPending       Status = "pending"
 	StatusScanning      Status = "scanning"
@@ -15,6 +17,14 @@ const (
 	StatusCanceled      Status = "canceled"
 )
 
+const (
+	ItemStatusPending   ItemStatus = "pending"
+	ItemStatusUploading ItemStatus = "uploading"
+	ItemStatusSuccess   ItemStatus = "success"
+	ItemStatusFailed    ItemStatus = "failed"
+	ItemStatusSkipped   ItemStatus = "skipped"
+)
+
 type Task struct {
 	ID        string
 	Source    string
@@ -24,4 +34,15 @@ type Task struct {
 	Status    Status
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+type Item struct {
+	TaskID       string
+	Path         string
+	RelativePath string
+	Size         int64
+	Status       ItemStatus
+	Error        string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }

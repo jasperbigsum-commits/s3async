@@ -13,6 +13,8 @@ func TestMatch(t *testing.T) {
 		{name: "match include", path: "report.csv", includes: []string{"*.csv"}, want: true},
 		{name: "reject exclude", path: "temp.tmp", excludes: []string{"*.tmp"}, want: false},
 		{name: "reject non include", path: "image.png", includes: []string{"*.csv"}, want: false},
+		{name: "match nested exclude glob", path: "dir/temp.tmp", excludes: []string{"*.tmp"}, want: false},
+		{name: "match directory exclude", path: ".git/config", excludes: []string{".git/*"}, want: false},
 	}
 
 	for _, tt := range tests {

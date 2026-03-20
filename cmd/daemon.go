@@ -5,6 +5,7 @@ import (
 	"time"
 
 	internaldaemon "github.com/jasperbigsum-commits/s3async/internal/daemon"
+	internallogging "github.com/jasperbigsum-commits/s3async/internal/logging"
 	"github.com/spf13/cobra"
 )
 
@@ -38,11 +39,23 @@ func newDaemonRunCmd() *cobra.Command {
 			defer release()
 			defer manager.ClearStopRequest()
 
+			auditRecorder, err := internallogging.NewFileAuditRecorder(manager.AuditLogPath())
+			if err != nil {
+				return fmt.Errorf("open audit log: %w", err)
+			}
+			defer auditRecorder.Close()
+
+			bootstrap, uploaderClient, execCfg, err := buildExecutionDeps(configPath)
+			if err != nil {
+				return err
+			}
+
+			startedAt := time.Now().UTC()
 			status := internaldaemon.Status{
 				PID:          pid,
 				State:        "running",
-				StartedAt:    time.Now().UTC(),
-				HeartbeatAt:  time.Now().UTC(),
+				StartedAt:    startedAt,
+				HeartbeatAt:  startedAt,
 				PollInterval: pollInterval.String(),
 				IdleTimeout:  idleTimeout.String(),
 				AuditLogPath: manager.AuditLogPath(),
@@ -50,13 +63,56 @@ func newDaemonRunCmd() *cobra.Command {
 			if err := manager.WriteStatus(status); err != nil {
 				return fmt.Errorf("write daemon status: %w", err)
 			}
+			_ = auditRecorder.Record(internallogging.AuditEvent{Event: "daemon_started", DaemonPID: pid, DaemonState: status.State, Message: "daemon loop started"})
 
-			if err := runWorkerLoopFn(cmd, configPath, false, pollInterval, idleTimeout); err != nil {
-				status.State = "error"
+			lastWorkAt := startedAt
+			for {
+				now := time.Now().UTC()
+				status.HeartbeatAt = now
+				status.QueuePolls++
+				if manager.StopRequested() {
+					status.State = "stopping"
+					status.StoppedAt = now
+					_ = manager.WriteStatus(status)
+					_ = auditRecorder.Record(internallogging.AuditEvent{Event: "daemon_stop_requested", DaemonPID: pid, DaemonState: status.State, Message: "stop file detected"})
+					break
+				}
+
+				executedTask, ok, err := bootstrap.TaskService.ExecuteNextQueuedTask(uploaderClient, execCfg)
+				if err != nil {
+					status.State = "error"
+					status.LastError = err.Error()
+					status.HeartbeatAt = time.Now().UTC()
+					_ = manager.WriteStatus(status)
+					_ = auditRecorder.Record(internallogging.AuditEvent{Event: "daemon_error", DaemonPID: pid, DaemonState: status.State, Error: err.Error(), Message: "execute next queued task failed"})
+					return fmt.Errorf("execute next queued task: %w", err)
+				}
+				if ok {
+					status.TasksExecuted++
+					status.CurrentTaskID = executedTask.ID
+					status.LastTaskID = executedTask.ID
+					status.LastTaskStatus = string(executedTask.Status)
+					status.LastError = executedTask.LastError
+					status.HeartbeatAt = time.Now().UTC()
+					_ = manager.WriteStatus(status)
+					_ = auditRecorder.Record(internallogging.AuditEvent{Event: "task_executed", DaemonPID: pid, DaemonState: status.State, TaskID: executedTask.ID, TaskStatus: string(executedTask.Status), Error: executedTask.LastError, Bucket: executedTask.Bucket, Prefix: executedTask.Prefix, Source: executedTask.Source, Message: "queued task executed"})
+					fmt.Fprintf(cmd.OutOrStdout(), "daemon executed task: %s (%s)\n", executedTask.ID, executedTask.Status)
+					status.CurrentTaskID = ""
+					lastWorkAt = time.Now().UTC()
+					continue
+				}
+
+				status.CurrentTaskID = ""
 				status.HeartbeatAt = time.Now().UTC()
-				status.LastError = err.Error()
 				_ = manager.WriteStatus(status)
-				return err
+				if idleTimeout > 0 && time.Since(lastWorkAt) >= idleTimeout {
+					status.State = "idle_timeout"
+					status.StoppedAt = time.Now().UTC()
+					_ = manager.WriteStatus(status)
+					_ = auditRecorder.Record(internallogging.AuditEvent{Event: "daemon_idle_timeout", DaemonPID: pid, DaemonState: status.State, Message: "idle timeout reached"})
+					break
+				}
+				time.Sleep(pollInterval)
 			}
 
 			status.State = "stopped"
@@ -66,6 +122,7 @@ func newDaemonRunCmd() *cobra.Command {
 			if err := manager.WriteStatus(status); err != nil {
 				return fmt.Errorf("write daemon stop status: %w", err)
 			}
+			_ = auditRecorder.Record(internallogging.AuditEvent{Event: "daemon_stopped", DaemonPID: pid, DaemonState: status.State, Message: "daemon loop stopped"})
 			return nil
 		},
 	}

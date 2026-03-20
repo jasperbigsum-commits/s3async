@@ -1,0 +1,5 @@
+dist/
+.s3async/
+*.db
+*.db-shm
+*.db-wal

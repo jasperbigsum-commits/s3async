@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+set -euo pipefail
+CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o dist/s3async-linux-amd64 ./...

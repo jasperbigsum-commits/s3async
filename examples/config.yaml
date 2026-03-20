@@ -1,0 +1,19 @@
+profile: default
+region: ap-southeast-1
+bucket: my-bucket
+prefix: backups/
+workers: 8
+database_path: ./.s3async/tasks.db
+retry:
+  max_attempts: 3
+  backoff_ms: 500
+filters:
+  include:
+    - "*.txt"
+    - "*.csv"
+  exclude:
+    - "*.tmp"
+    - ".git/*"
+security:
+  redact_logs: true
+  dry_run: false

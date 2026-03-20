@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,12 +11,20 @@ import (
 	"syscall"
 	"time"
 
+	internaldaemon "github.com/jasperbigsum-commits/s3async/internal/daemon"
 	"github.com/jasperbigsum-commits/s3async/internal/app"
 	"github.com/jasperbigsum-commits/s3async/internal/filter"
 	"github.com/jasperbigsum-commits/s3async/internal/scanner"
 	"github.com/jasperbigsum-commits/s3async/internal/task"
 	"github.com/jasperbigsum-commits/s3async/internal/uploader"
 	"github.com/spf13/cobra"
+)
+
+var (
+	newBootstrapWithConfig = app.NewBootstrapWithConfig
+	runTaskOnceFn          = runTaskOnce
+	runWorkerLoopFn        = runWorkerLoop
+	spawnDaemonFn          = spawnDaemon
 )
 
 func newSyncCmd() *cobra.Command {
@@ -30,7 +40,7 @@ func newSyncCmd() *cobra.Command {
 		Short: "Create a sync task",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			bootstrap, err := app.NewBootstrapWithConfig(configPath)
+			bootstrap, err := newBootstrapWithConfig(configPath)
 			if err != nil {
 				return fmt.Errorf("create bootstrap: %w", err)
 			}
@@ -83,6 +93,7 @@ func newSyncCmd() *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "task created: %s\n", createdTask.ID)
 			fmt.Fprintf(cmd.OutOrStdout(), "status: %s\n", createdTask.Status)
 			fmt.Fprintf(cmd.OutOrStdout(), "planned items: %d\n", len(items))
+			fmt.Fprintf(cmd.OutOrStdout(), "planned bytes: %d\n", createdTask.TotalBytes)
 
 			if len(items) == 0 {
 				if err := service.CompleteTaskIfEmpty(createdTask.ID); err != nil {
@@ -93,14 +104,14 @@ func newSyncCmd() *cobra.Command {
 			}
 
 			if async {
-				if err := spawnBackgroundRunner(createdTask.ID, configPath); err != nil {
-					return fmt.Errorf("spawn background runner: %w", err)
+				if err := spawnDaemonFn(configPath); err != nil {
+					return fmt.Errorf("start daemon: %w", err)
 				}
-				fmt.Fprintln(cmd.OutOrStdout(), "background runner started")
+				fmt.Fprintln(cmd.OutOrStdout(), "daemon ensured")
 				return nil
 			}
 
-			if err := runTaskOnce(createdTask.ID, configPath); err != nil {
+			if err := runTaskOnceFn(createdTask.ID, configPath); err != nil {
 				return fmt.Errorf("run task: %w", err)
 			}
 
@@ -167,7 +178,7 @@ func runWorkerLoop(cmd *cobra.Command, configPath string, once bool, pollInterva
 }
 
 func buildExecutionDeps(configPath string) (*app.Bootstrap, *uploader.Client, task.ExecutionConfig, error) {
-	bootstrap, err := app.NewBootstrapWithConfig(configPath)
+	bootstrap, err := newBootstrapWithConfig(configPath)
 	if err != nil {
 		return nil, nil, task.ExecutionConfig{}, fmt.Errorf("create bootstrap: %w", err)
 	}
@@ -185,13 +196,27 @@ func buildExecutionDeps(configPath string) (*app.Bootstrap, *uploader.Client, ta
 	return bootstrap, uploaderClient, execCfg, nil
 }
 
-func spawnBackgroundRunner(taskID string, configPath string) error {
+func spawnDaemon(configPath string) error {
+	bootstrap, err := newBootstrapWithConfig(configPath)
+	if err != nil {
+		return fmt.Errorf("create bootstrap: %w", err)
+	}
+
+	manager := internaldaemon.NewManager(bootstrap.Config.StateDir)
+	running, pid, err := manager.IsRunning()
+	if err != nil {
+		return fmt.Errorf("check daemon status: %w", err)
+	}
+	if running {
+		return nil
+	}
+
 	exePath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve executable path: %w", err)
 	}
 
-	args := []string{"task", "worker", "--task-id", taskID}
+	args := []string{"daemon", "run"}
 	if configPath != "" {
 		args = append(args, "--config", configPath)
 	}
@@ -206,8 +231,25 @@ func spawnBackgroundRunner(taskID string, configPath string) error {
 	}
 
 	if err := proc.Start(); err != nil {
-		return fmt.Errorf("start process: %w", err)
+		if running && pid > 0 {
+			return nil
+		}
+		return fmt.Errorf("start daemon process: %w", err)
 	}
 
 	return proc.Process.Release()
+}
+
+func executeCommand(root *cobra.Command, args ...string) (string, string, error) {
+	stdout := new(bytes.Buffer)
+	stderr := new(bytes.Buffer)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.SetArgs(args)
+	err := root.Execute()
+	return stdout.String(), stderr.String(), err
+}
+
+func isAlreadyRunning(err error) bool {
+	return errors.Is(err, internaldaemon.ErrAlreadyRunning)
 }

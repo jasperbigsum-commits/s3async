@@ -16,6 +16,7 @@ type Config struct {
 	Prefix       string
 	Workers      int
 	DatabasePath string
+	StateDir     string
 	Retry        RetryConfig
 	Filters      FilterConfig
 	Security     SecurityConfig
@@ -54,6 +55,7 @@ func Load(configPath string) (Config, error) {
 	v.SetDefault("prefix", "")
 	v.SetDefault("workers", 4)
 	v.SetDefault("database_path", filepath.Join(homeDir, ".s3async", "tasks.db"))
+	v.SetDefault("state_dir", filepath.Join(homeDir, ".s3async"))
 	v.SetDefault("retry.max_attempts", 3)
 	v.SetDefault("retry.backoff_ms", 500)
 	v.SetDefault("filters.include", []string{})
@@ -85,6 +87,7 @@ func Load(configPath string) (Config, error) {
 		Prefix:       v.GetString("prefix"),
 		Workers:      v.GetInt("workers"),
 		DatabasePath: v.GetString("database_path"),
+		StateDir:     v.GetString("state_dir"),
 		Retry: RetryConfig{
 			MaxAttempts: v.GetInt("retry.max_attempts"),
 			BackoffMS:   v.GetInt("retry.backoff_ms"),
@@ -101,6 +104,9 @@ func Load(configPath string) (Config, error) {
 
 	if cfg.Workers <= 0 {
 		cfg.Workers = 4
+	}
+	if cfg.StateDir == "" {
+		cfg.StateDir = filepath.Dir(cfg.DatabasePath)
 	}
 
 	return cfg, nil

@@ -49,6 +49,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     success_items INTEGER NOT NULL DEFAULT 0,
     failed_items INTEGER NOT NULL DEFAULT 0,
     skipped_items INTEGER NOT NULL DEFAULT 0,
+    total_bytes INTEGER NOT NULL DEFAULT 0,
+    pending_bytes INTEGER NOT NULL DEFAULT 0,
+    uploading_bytes INTEGER NOT NULL DEFAULT 0,
+    success_bytes INTEGER NOT NULL DEFAULT 0,
+    failed_bytes INTEGER NOT NULL DEFAULT 0,
+    skipped_bytes INTEGER NOT NULL DEFAULT 0,
     last_error TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -102,6 +108,24 @@ CREATE TABLE IF NOT EXISTS task_items (
 	}
 	if !taskColumns["skipped_items"] {
 		alterStatements = append(alterStatements, `ALTER TABLE tasks ADD COLUMN skipped_items INTEGER NOT NULL DEFAULT 0`)
+	}
+	if !taskColumns["total_bytes"] {
+		alterStatements = append(alterStatements, `ALTER TABLE tasks ADD COLUMN total_bytes INTEGER NOT NULL DEFAULT 0`)
+	}
+	if !taskColumns["pending_bytes"] {
+		alterStatements = append(alterStatements, `ALTER TABLE tasks ADD COLUMN pending_bytes INTEGER NOT NULL DEFAULT 0`)
+	}
+	if !taskColumns["uploading_bytes"] {
+		alterStatements = append(alterStatements, `ALTER TABLE tasks ADD COLUMN uploading_bytes INTEGER NOT NULL DEFAULT 0`)
+	}
+	if !taskColumns["success_bytes"] {
+		alterStatements = append(alterStatements, `ALTER TABLE tasks ADD COLUMN success_bytes INTEGER NOT NULL DEFAULT 0`)
+	}
+	if !taskColumns["failed_bytes"] {
+		alterStatements = append(alterStatements, `ALTER TABLE tasks ADD COLUMN failed_bytes INTEGER NOT NULL DEFAULT 0`)
+	}
+	if !taskColumns["skipped_bytes"] {
+		alterStatements = append(alterStatements, `ALTER TABLE tasks ADD COLUMN skipped_bytes INTEGER NOT NULL DEFAULT 0`)
 	}
 	if !taskColumns["last_error"] {
 		alterStatements = append(alterStatements, `ALTER TABLE tasks ADD COLUMN last_error TEXT NOT NULL DEFAULT ''`)
@@ -196,6 +220,12 @@ func (r *SQLiteTaskRepository) refreshTaskSummaries() error {
 		t.SuccessItems = total.SuccessItems
 		t.FailedItems = total.FailedItems
 		t.SkippedItems = total.SkippedItems
+		t.TotalBytes = total.TotalBytes
+		t.PendingBytes = total.PendingBytes
+		t.UploadingBytes = total.UploadingBytes
+		t.SuccessBytes = total.SuccessBytes
+		t.FailedBytes = total.FailedBytes
+		t.SkippedBytes = total.SkippedBytes
 		if t.LastError == "" {
 			for i := len(items) - 1; i >= 0; i-- {
 				if items[i].Error != "" {
@@ -223,8 +253,9 @@ func (r *SQLiteTaskRepository) Create(t task.Task, items []task.Item) error {
 		`INSERT INTO tasks (
 			id, source, bucket, prefix_value, mode, status,
 			total_items, pending_items, uploading_items, success_items, failed_items, skipped_items,
+			total_bytes, pending_bytes, uploading_bytes, success_bytes, failed_bytes, skipped_bytes,
 			last_error, created_at, updated_at, started_at, completed_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.ID,
 		t.Source,
 		t.Bucket,
@@ -237,6 +268,12 @@ func (r *SQLiteTaskRepository) Create(t task.Task, items []task.Item) error {
 		t.SuccessItems,
 		t.FailedItems,
 		t.SkippedItems,
+		t.TotalBytes,
+		t.PendingBytes,
+		t.UploadingBytes,
+		t.SuccessBytes,
+		t.FailedBytes,
+		t.SkippedBytes,
 		t.LastError,
 		t.CreatedAt.Format(time.RFC3339Nano),
 		t.UpdatedAt.Format(time.RFC3339Nano),
@@ -281,6 +318,7 @@ func (r *SQLiteTaskRepository) List() ([]task.Task, error) {
 	rows, err := r.db.Query(`
 		SELECT id, source, bucket, prefix_value, mode, status,
 		       total_items, pending_items, uploading_items, success_items, failed_items, skipped_items,
+		       total_bytes, pending_bytes, uploading_bytes, success_bytes, failed_bytes, skipped_bytes,
 		       last_error, created_at, updated_at, started_at, completed_at
 		FROM tasks
 		ORDER BY created_at DESC`)
@@ -309,6 +347,7 @@ func (r *SQLiteTaskRepository) Get(id string) (task.Task, error) {
 	row := r.db.QueryRow(`
 		SELECT id, source, bucket, prefix_value, mode, status,
 		       total_items, pending_items, uploading_items, success_items, failed_items, skipped_items,
+		       total_bytes, pending_bytes, uploading_bytes, success_bytes, failed_bytes, skipped_bytes,
 		       last_error, created_at, updated_at, started_at, completed_at
 		FROM tasks WHERE id = ?`, id)
 	item, err := scanTask(row.Scan)
@@ -364,6 +403,12 @@ func (r *SQLiteTaskRepository) UpdateTask(t task.Task) error {
 			success_items = ?,
 			failed_items = ?,
 			skipped_items = ?,
+			total_bytes = ?,
+			pending_bytes = ?,
+			uploading_bytes = ?,
+			success_bytes = ?,
+			failed_bytes = ?,
+			skipped_bytes = ?,
 			last_error = ?,
 			updated_at = ?,
 			started_at = ?,
@@ -376,6 +421,12 @@ func (r *SQLiteTaskRepository) UpdateTask(t task.Task) error {
 		t.SuccessItems,
 		t.FailedItems,
 		t.SkippedItems,
+		t.TotalBytes,
+		t.PendingBytes,
+		t.UploadingBytes,
+		t.SuccessBytes,
+		t.FailedBytes,
+		t.SkippedBytes,
 		t.LastError,
 		t.UpdatedAt.Format(time.RFC3339Nano),
 		formatNullableTime(t.StartedAt),
@@ -453,6 +504,7 @@ func (r *SQLiteTaskRepository) ClaimNextQueued() (task.Task, bool, error) {
 	row := tx.QueryRow(`
 		SELECT id, source, bucket, prefix_value, mode, status,
 		       total_items, pending_items, uploading_items, success_items, failed_items, skipped_items,
+		       total_bytes, pending_bytes, uploading_bytes, success_bytes, failed_bytes, skipped_bytes,
 		       last_error, created_at, updated_at, started_at, completed_at
 		FROM tasks
 		WHERE status = ?
@@ -519,6 +571,12 @@ func scanTask(scan scanFn) (task.Task, error) {
 		&item.SuccessItems,
 		&item.FailedItems,
 		&item.SkippedItems,
+		&item.TotalBytes,
+		&item.PendingBytes,
+		&item.UploadingBytes,
+		&item.SuccessBytes,
+		&item.FailedBytes,
+		&item.SkippedBytes,
 		&item.LastError,
 		&createdAt,
 		&updatedAt,

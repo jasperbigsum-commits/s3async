@@ -1,7 +1,30 @@
-profile: default
-region: ap-southeast-1
-bucket: my-bucket
-prefix: backups/
+# AWS S3 example
+s3:
+  profile: default
+  region: ap-southeast-1
+  bucket: my-bucket
+  prefix: backups/
+  # endpoint: (default AWS S3)
+  # force_path_style: false
+  # skip_tls_verify: false
+  # ca_cert_file: ""
+  # static_credentials:
+  #   access_key_id: ""
+  #   secret_access_key: ""
+
+# MinIO / rustfs compatible S3 endpoint example
+# s3:
+#   region: us-east-1
+#   bucket: local-bucket
+#   prefix: backups/
+#   endpoint: http://127.0.0.1:9000
+#   force_path_style: true
+#   skip_tls_verify: true  # Only for local development
+#   # ca_cert_file: "/path/to/ca.crt"
+#   static_credentials:
+#     access_key_id: minioadmin
+#     secret_access_key: minioadmin
+
 workers: 8
 database_path: ./.s3async/tasks.db
 retry:

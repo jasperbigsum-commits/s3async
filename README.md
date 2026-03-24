@@ -44,11 +44,46 @@ go run . validate --config examples/config.yaml
 ## Configuration
 See `examples/config.yaml`.
 
-Supported configuration sources:
-- `--config /path/to/config.yaml`
-- `config.yaml` in current directory
-- `~/.s3async/config.yaml`
-- environment variables such as `S3ASYNC_BUCKET`, `S3ASYNC_REGION`, `S3ASYNC_DB_PATH`
+### New S3 Configuration Structure (Recommended)
+The new `s3.*` configuration takes precedence over legacy top-level fields:
+
+```yaml
+s3:
+  profile: default              # AWS profile name
+  region: ap-southeast-1         # S3 region
+  bucket: my-bucket             # S3 bucket name
+  prefix: backups/              # S3 prefix for uploads
+  endpoint: http://127.0.0.1:9000  # S3-compatible endpoint (MinIO, etc.)
+  force_path_style: true        # Use path-style addressing (required for MinIO)
+  skip_tls_verify: false        # Skip TLS verification (dev only!)
+  ca_cert_file: ""              # Custom CA certificate file for HTTPS
+  static_credentials:           # Static credentials (takes precedence over profile)
+    access_key_id: AKIAIOSFODNN7EXAMPLE
+    secret_access_key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+```
+
+### Legacy Fields (Backward Compatible)
+Top-level `profile`, `region`, `bucket`, `prefix` are still supported but deprecated.
+
+### Environment Variables
+- `S3ASYNC_S3_PROFILE`, `S3ASYNC_S3_REGION`, `S3ASYNC_S3_BUCKET`
+- Or legacy: `S3ASYNC_PROFILE`, `S3ASYNC_REGION`, `S3ASYNC_BUCKET`
+
+### MinIO Testing
+```bash
+# Start MinIO locally
+docker run -p 9000:9000 -p 9001:9001 --name minio -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin minio/minio server /data --console-address ":9001"
+
+# Run s3async with MinIO endpoint
+go run . validate --config examples/config.yaml
+go run . sync ./data --config examples/config.yaml --async=false
+```
+
+### Security Notes
+- **Never commit secrets** to version control
+- Use environment variables or IAM roles in production
+- `skip_tls_verify: true` is for local development only
+- Use `dry_run: true` to test configuration safely
 
 ## Documentation
 - `docs/design.md`

@@ -17,6 +17,7 @@
 - SQLite-backed queued task claiming for supervisor / worker flows.
 - SQLite tests covering richer task/item metrics persistence and queue claiming.
 - Focused task service tests covering repository failure propagation during per-item execution updates.
+- Persistent `task-events.jsonl` execution event log and `task events` CLI for recent task/item history inspection.
 
 ### Changed
 - Sync command now plans file items before creating tasks.
@@ -29,6 +30,7 @@
 - `task list` and `task status` now expose richer observability, timestamps, and failed item details.
 - Async background execution now launches queue-aware worker mode instead of only a raw `task run` subprocess.
 - Task execution now fails fast when repository updates for item/task progress cannot be persisted.
+- Runtime observability is now split between daemon lifecycle audit logs and per-task execution event logs.
 
 ### Pending
 - Dedicated installable background daemon / service mode.
@@ -36,3 +38,4 @@
 - Retry backoff strategy improvements with jitter.
 - Multipart upload and resume support.
 - Self-audit checklist to be applied on every PR.
+- GitHub code search automation once `gh` auth is available in the execution environment.

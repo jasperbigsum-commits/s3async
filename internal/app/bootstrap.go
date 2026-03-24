@@ -2,8 +2,10 @@ package app
 
 import (
 	"fmt"
+	"path/filepath"
 
 	cfgpkg "github.com/jasperbigsum-commits/s3async/internal/config"
+	internallogging "github.com/jasperbigsum-commits/s3async/internal/logging"
 	"github.com/jasperbigsum-commits/s3async/internal/store"
 	"github.com/jasperbigsum-commits/s3async/internal/task"
 )
@@ -28,5 +30,10 @@ func NewBootstrapWithConfig(configPath string) (*Bootstrap, error) {
 		return nil, fmt.Errorf("create sqlite repository: %w", err)
 	}
 
-	return &Bootstrap{Config: cfg, TaskService: task.NewService(repo)}, nil
+	auditRecorder, err := internallogging.NewFileAuditRecorder(filepath.Join(cfg.StateDir, "task-events.jsonl"))
+	if err != nil {
+		return nil, fmt.Errorf("create task event recorder: %w", err)
+	}
+
+	return &Bootstrap{Config: cfg, TaskService: task.NewService(repo, taskEventRecorderAdapter{recorder: auditRecorder})}, nil
 }

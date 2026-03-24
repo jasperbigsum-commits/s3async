@@ -190,7 +190,7 @@ func TestCreateTaskStatus(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			repo := newMemoryRepo()
-			service := NewService(repo)
+			service := NewService(repo, nil)
 
 			createdTask, err := service.CreateTask("./data", "bucket", "prefix", tt.async, []Item{{Path: "a.txt", RelativePath: "a.txt", Size: 1}})
 			if err != nil {
@@ -206,7 +206,7 @@ func TestCreateTaskStatus(t *testing.T) {
 
 func TestCreateTaskPersistsItems(t *testing.T) {
 	repo := newMemoryRepo()
-	service := NewService(repo)
+	service := NewService(repo, nil)
 
 	createdTask, err := service.CreateTask("./data", "bucket", "prefix", true, []Item{{Path: "a.txt", RelativePath: "a.txt", Size: 1}})
 	if err != nil {
@@ -233,7 +233,7 @@ func TestCreateTaskPersistsItems(t *testing.T) {
 
 func TestRetryTask(t *testing.T) {
 	repo := newMemoryRepo()
-	service := NewService(repo)
+	service := NewService(repo, nil)
 	createdTask, err := service.CreateTask("./data", "bucket", "prefix", false, []Item{{Path: "a.txt", RelativePath: "a.txt", Size: 1, Status: ItemStatusFailed, Error: "boom"}})
 	if err != nil {
 		t.Fatalf("CreateTask() error = %v", err)
@@ -289,7 +289,7 @@ func TestRetryTask(t *testing.T) {
 
 func TestExecuteTaskSuccess(t *testing.T) {
 	repo := newMemoryRepo()
-	service := NewService(repo)
+	service := NewService(repo, nil)
 	createdTask, err := service.CreateTask("./data", "bucket", "backup", true, []Item{
 		{Path: "a.txt", RelativePath: "a.txt", Size: 1},
 		{Path: "b.txt", RelativePath: "sub/b.txt", Size: 2},
@@ -339,7 +339,7 @@ func TestExecuteTaskSuccess(t *testing.T) {
 
 func TestExecuteTaskPartialFailure(t *testing.T) {
 	repo := newMemoryRepo()
-	service := NewService(repo)
+	service := NewService(repo, nil)
 	createdTask, err := service.CreateTask("./data", "bucket", "", true, []Item{
 		{Path: "a.txt", RelativePath: "a.txt", Size: 1},
 		{Path: "b.txt", RelativePath: "b.txt", Size: 2},
@@ -394,7 +394,7 @@ func TestExecuteTaskPartialFailure(t *testing.T) {
 
 func TestExecuteTaskRetriesThenSucceeds(t *testing.T) {
 	repo := newMemoryRepo()
-	service := NewService(repo)
+	service := NewService(repo, nil)
 	createdTask, err := service.CreateTask("./data", "bucket", "prefix", true, []Item{{Path: "a.txt", RelativePath: "a.txt", Size: 1}})
 	if err != nil {
 		t.Fatalf("CreateTask() error = %v", err)
@@ -431,7 +431,7 @@ func TestExecuteTaskRetriesThenSucceeds(t *testing.T) {
 func TestExecuteTaskReturnsErrorWhenUpdateItemStatusFails(t *testing.T) {
 	repo := newMemoryRepo()
 	repo.failUpdateItemPath = "a.txt"
-	service := NewService(repo)
+	service := NewService(repo, nil)
 	createdTask, err := service.CreateTask("./data", "bucket", "", true, []Item{{Path: "a.txt", RelativePath: "a.txt", Size: 1}})
 	if err != nil {
 		t.Fatalf("CreateTask() error = %v", err)
@@ -448,7 +448,7 @@ func TestExecuteTaskReturnsErrorWhenUpdateItemStatusFails(t *testing.T) {
 
 func TestExecuteTaskReturnsErrorWhenProgressPersistenceFails(t *testing.T) {
 	repo := newMemoryRepo()
-	service := NewService(repo)
+	service := NewService(repo, nil)
 	createdTask, err := service.CreateTask("./data", "bucket", "", true, []Item{{Path: "a.txt", RelativePath: "a.txt", Size: 1}})
 	if err != nil {
 		t.Fatalf("CreateTask() error = %v", err)
@@ -466,7 +466,7 @@ func TestExecuteTaskReturnsErrorWhenProgressPersistenceFails(t *testing.T) {
 
 func TestExecuteNextQueuedTaskClaimsOldestQueued(t *testing.T) {
 	repo := newMemoryRepo()
-	service := NewService(repo)
+	service := NewService(repo, nil)
 	first, err := service.CreateTask("./first", "bucket", "", true, []Item{{Path: "a.txt", RelativePath: "a.txt", Size: 1}})
 	if err != nil {
 		t.Fatalf("CreateTask(first) error = %v", err)

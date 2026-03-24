@@ -30,11 +30,21 @@ type ExecutionConfig struct {
 }
 
 type Service struct {
-	repo Repository
+	repo     Repository
+	recorder EventRecorder
 }
 
-func NewService(repo Repository) *Service {
-	return &Service{repo: repo}
+func NewService(repo Repository, recorder EventRecorder) *Service {
+	return &Service{repo: repo, recorder: recorder}
+}
+
+func (s *Service) emitEvent(eventType string, t Task, item Item, items []Item, cfg ExecutionConfig, message string, errMsg string) {
+	if s.recorder == nil {
+		return
+	}
+	summary := BuildSummary(items)
+	event := NewTaskEvent(eventType, t, item, cfg, summary, message, errMsg)
+	_ = s.recorder.Record(event)
 }
 
 func (s *Service) CreateTask(source string, bucket string, prefix string, async bool, items []Item) (Task, error) {
@@ -69,6 +79,7 @@ func (s *Service) CreateTask(source string, bucket string, prefix string, async 
 		return Task{}, fmt.Errorf("persist task: %w", err)
 	}
 
+	s.emitEvent("task_created", t, Item{}, items, ExecutionConfig{}, "task persisted", "")
 	return t, nil
 }
 
@@ -143,6 +154,7 @@ func (s *Service) RetryTask(id string) error {
 		return fmt.Errorf("update task after retry: %w", err)
 	}
 
+	s.emitEvent("task_retried", t, Item{}, items, ExecutionConfig{}, "task moved back to queue", "")
 	return nil
 }
 
@@ -206,6 +218,7 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 		if err := s.repo.UpdateTask(t); err != nil {
 			return fmt.Errorf("complete empty task: %w", err)
 		}
+		s.emitEvent("task_completed_empty", t, Item{}, nil, ExecutionConfig{}, "task completed with no items", "")
 		return nil
 	}
 
@@ -222,6 +235,7 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 		if err := s.repo.UpdateTask(t); err != nil {
 			return fmt.Errorf("mark task running: %w", err)
 		}
+		s.emitEvent("task_started", t, Item{}, items, cfg, "task execution started", "")
 	}
 
 	var mu sync.Mutex
@@ -281,6 +295,9 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 		}
 		if err := persistProgress(); err != nil {
 			return err
+		}
+		if updatedItem, ok := FindItemByRelativePath(items, relativePath); ok {
+			s.emitEvent("item_status_changed", t, updatedItem, items, cfg, fmt.Sprintf("item moved to %s", status), errMsg)
 		}
 		return nil
 	}
@@ -362,6 +379,7 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 			t.CompletedAt = &now
 			ApplySummary(&t, BuildSummary(finalItems))
 			_ = s.repo.UpdateTask(t)
+			s.emitEvent("task_execution_error", t, Item{}, finalItems, cfg, "task execution aborted by persistence error", err.Error())
 		}
 		return err
 	}
@@ -381,6 +399,7 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 	if err := s.repo.UpdateTask(t); err != nil {
 		return fmt.Errorf("update final task state: %w", err)
 	}
+	s.emitEvent("task_finished", t, Item{}, finalItems, cfg, fmt.Sprintf("task finished with status %s", finalStatus), t.LastError)
 
 	return nil
 }

@@ -9,6 +9,7 @@
 - Foreground execution and queue-aware background worker flow
 - File-level status, attempt, and timestamp updates during uploads
 - Retry-aware execution pipeline for queued tasks
+- Persistent task event logging for execution history and troubleshooting
 - Configuration loading via config file and environment variables
 - Validation command with actionable environment output
 
@@ -17,9 +18,13 @@
 s3async sync <source>
 s3async task list
 s3async task status <task-id>
+s3async task events
 s3async task retry <task-id>
 s3async task run <task-id>
 s3async task worker
+s3async daemon run
+s3async daemon status
+s3async daemon stop
 s3async validate
 s3async version
 ```
@@ -31,6 +36,8 @@ go run . sync ./data --config examples/config.yaml --async=false
 go run . task worker --once
 go run . task worker --poll-interval 2s --idle-timeout 30s
 go run . task status <task-id> --failed-limit 20
+go run . task events --task-id <task-id> --limit 100
+go run . daemon status
 go run . validate --config examples/config.yaml
 ```
 
@@ -49,6 +56,12 @@ Supported configuration sources:
 - `docs/work-log.md`
 - `docs/change-log.md`
 
+## Operational visibility
+- Task execution events are appended to `<state_dir>/task-events.jsonl`.
+- Daemon lifecycle and queue supervisor events are appended to `<state_dir>/audit.jsonl`.
+- Use `s3async task events --task-id <task-id>` to inspect recent item transitions and terminal task outcomes.
+- Use `s3async daemon status` to inspect the current daemon PID, heartbeat, and state directory.
+
 ## Security
 - Do not persist AWS secrets in task storage.
 - Prefer environment variables, AWS profile, or IAM role.
@@ -61,6 +74,7 @@ go mod tidy
 go test ./...
 go test -race ./...
 go test -cover ./...
+go build ./...
 ```
 
 ## Current TODOs
@@ -68,4 +82,4 @@ go test -cover ./...
 - multipart upload and resume
 - retry jitter and selective retry policies
 - MinIO and compatible S3 endpoints
-- structured execution logs and self-audit checklist automation
+- richer CLI integration tests for daemon/task observability flows

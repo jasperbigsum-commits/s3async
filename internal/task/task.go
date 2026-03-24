@@ -26,20 +26,20 @@ const (
 )
 
 type Summary struct {
-	TotalItems      int
-	PendingItems    int
-	UploadingItems  int
-	SuccessItems    int
-	FailedItems     int
-	SkippedItems    int
-	TotalBytes      int64
-	PendingBytes    int64
-	UploadingBytes  int64
-	SuccessBytes    int64
-	FailedBytes     int64
-	SkippedBytes    int64
-	CompletedItems  int
-	CompletedBytes  int64
+	TotalItems     int
+	PendingItems   int
+	UploadingItems int
+	SuccessItems   int
+	FailedItems    int
+	SkippedItems   int
+	TotalBytes     int64
+	PendingBytes   int64
+	UploadingBytes int64
+	SuccessBytes   int64
+	FailedBytes    int64
+	SkippedBytes   int64
+	CompletedItems int
+	CompletedBytes int64
 }
 
 type Task struct {
@@ -83,25 +83,21 @@ type Item struct {
 }
 
 type TaskEvent struct {
-	Time          time.Time
-	TaskID        string
-	TaskStatus    Status
-	ItemPath      string
-	ItemStatus    ItemStatus
-	Attempt       int
-	Size          int64
-	Message       string
-	Error         string
-	Bucket        string
-	Prefix        string
-	Source        string
-	Summary       Summary
-	Workers       int
-	MaxAttempts   int
-}
-
-type Observer interface {
-	OnTaskEvent(TaskEvent)
+	Time        time.Time
+	TaskID      string
+	TaskStatus  Status
+	ItemPath    string
+	ItemStatus  ItemStatus
+	Attempt     int
+	Size        int64
+	Message     string
+	Error       string
+	Bucket      string
+	Prefix      string
+	Source      string
+	Summary     Summary
+	Workers     int
+	MaxAttempts int
 }
 
 func BuildSummary(items []Item) Summary {

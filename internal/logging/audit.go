@@ -7,26 +7,29 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	taskpkg "github.com/jasperbigsum-commits/s3async/internal/task"
 )
 
 type AuditEvent struct {
-	Time         time.Time `json:"time"`
-	Event        string    `json:"event"`
-	TaskID       string    `json:"task_id,omitempty"`
-	ItemPath     string    `json:"item_path,omitempty"`
-	TaskStatus   string    `json:"task_status,omitempty"`
-	ItemStatus   string    `json:"item_status,omitempty"`
-	Attempt      int       `json:"attempt,omitempty"`
-	Message      string    `json:"message,omitempty"`
-	Error        string    `json:"error,omitempty"`
-	WorkerCount  int       `json:"worker_count,omitempty"`
-	MaxAttempts  int       `json:"max_attempts,omitempty"`
-	Bytes        int64     `json:"bytes,omitempty"`
-	Bucket       string    `json:"bucket,omitempty"`
-	Prefix       string    `json:"prefix,omitempty"`
-	Source       string    `json:"source,omitempty"`
-	DaemonPID    int       `json:"daemon_pid,omitempty"`
-	DaemonState  string    `json:"daemon_state,omitempty"`
+	Time        time.Time        `json:"time"`
+	Event       string           `json:"event"`
+	TaskID      string           `json:"task_id,omitempty"`
+	ItemPath    string           `json:"item_path,omitempty"`
+	TaskStatus  string           `json:"task_status,omitempty"`
+	ItemStatus  string           `json:"item_status,omitempty"`
+	Attempt     int              `json:"attempt,omitempty"`
+	Message     string           `json:"message,omitempty"`
+	Error       string           `json:"error,omitempty"`
+	WorkerCount int              `json:"worker_count,omitempty"`
+	MaxAttempts int              `json:"max_attempts,omitempty"`
+	Bytes       int64            `json:"bytes,omitempty"`
+	Bucket      string           `json:"bucket,omitempty"`
+	Prefix      string           `json:"prefix,omitempty"`
+	Source      string           `json:"source,omitempty"`
+	DaemonPID   int              `json:"daemon_pid,omitempty"`
+	DaemonState string           `json:"daemon_state,omitempty"`
+	Summary     *taskpkg.Summary `json:"summary,omitempty"`
 }
 
 type AuditRecorder interface {
@@ -64,6 +67,27 @@ func (r *FileAuditRecorder) Record(event AuditEvent) error {
 		return fmt.Errorf("write audit event: %w", err)
 	}
 	return nil
+}
+
+func (r *FileAuditRecorder) RecordTaskEvent(event taskpkg.TaskEvent) error {
+	return r.Record(AuditEvent{
+		Time:        event.Time,
+		Event:       "task_event",
+		TaskID:      event.TaskID,
+		ItemPath:    event.ItemPath,
+		TaskStatus:  string(event.TaskStatus),
+		ItemStatus:  string(event.ItemStatus),
+		Attempt:     event.Attempt,
+		Message:     event.Message,
+		Error:       event.Error,
+		WorkerCount: event.Workers,
+		MaxAttempts: event.MaxAttempts,
+		Bytes:       event.Size,
+		Bucket:      event.Bucket,
+		Prefix:      event.Prefix,
+		Source:      event.Source,
+		Summary:     &event.Summary,
+	})
 }
 
 func (r *FileAuditRecorder) Close() error {

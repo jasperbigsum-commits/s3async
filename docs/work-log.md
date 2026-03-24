@@ -33,16 +33,22 @@
 - Post-commit validation initially exposed race conditions in the concurrent task-service test doubles; fixed the test harness to be concurrency-safe and then re-ran `go test ./...`, `go test -race ./...`, `go test -cover ./internal/task ./internal/store`, and `go run . validate` successfully.
 - Hardened task execution so repository update failures during per-item progress persistence now surface as execution errors instead of being silently ignored.
 - Added focused task service tests for `UpdateItemStatus` and `UpdateTask` failure paths during execution.
+- Added persistent `task-events.jsonl` logging for task lifecycle and per-item transitions.
+- Added `task events` command for recent execution-history inspection by task ID or message match.
+- Re-ran `go test ./...`, `go test -race ./...`, and `go build ./...` successfully after event-log changes.
+- Attempted mandatory GitHub code search via `gh search`, but local environment is not authenticated yet (`gh auth login` / `GH_TOKEN` required), so continued with local implementation review.
 
 ### Risks / Notes
 - Current async mode now has a queue-aware worker loop, but process launch is still detach-based rather than a managed OS service/daemon install.
 - Progress metrics are state/attempt/timestamp oriented; byte-level upload progress and throughput metrics are not yet implemented.
 - Background execution currently depends on being able to relaunch the same executable.
-- Task progress counters are persisted during execution, but structured event logs are still pending.
+- Task progress counters are persisted during execution, and structured per-task execution events are now appended to `task-events.jsonl`.
 - Command-layer automated coverage is still minimal (`cmd` package remains uncovered), so CLI wiring regressions are still a risk.
+- GitHub code search is part of the preferred workflow, but this environment currently lacks `gh` authentication.
 
 ### Next Suggested Iteration
 - Convert worker mode into a first-class installable daemon/service supervisor.
 - Add byte-level progress, transfer rate metrics, and more structured execution history.
 - Add configurable retry jitter and selective retry policies.
 - Add integration tests around CLI output and end-to-end dry-run worker execution.
+- Add daemon/task log rotation and retention controls for long-running deployments.

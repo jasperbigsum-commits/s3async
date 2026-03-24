@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jasperbigsum-commits/s3async/internal/app"
+	internallogging "github.com/jasperbigsum-commits/s3async/internal/logging"
 	taskpkg "github.com/jasperbigsum-commits/s3async/internal/task"
 	"github.com/spf13/cobra"
 )
@@ -16,6 +18,7 @@ func newTaskCmd() *cobra.Command {
 	cmd.AddCommand(newTaskRetryCmd())
 	cmd.AddCommand(newTaskRunCmd())
 	cmd.AddCommand(newTaskWorkerCmd())
+	cmd.AddCommand(newTaskEventsCmd())
 	return cmd
 }
 
@@ -210,6 +213,66 @@ func newTaskWorkerCmd() *cobra.Command {
 	cmd.Flags().StringVar(&taskID, "task-id", "", "Specific task ID to execute once instead of polling the queue")
 	cmd.Flags().DurationVar(&pollInterval, "poll-interval", 2*time.Second, "How often the worker polls for queued tasks")
 	cmd.Flags().DurationVar(&idleTimeout, "idle-timeout", 0, "Exit after this much idle time without queued tasks (0 = never)")
+	return cmd
+}
+
+func newTaskEventsCmd() *cobra.Command {
+	var configPath string
+	var taskID string
+	var eventName string
+	var limit int
+
+	cmd := &cobra.Command{
+		Use:   "events",
+		Short: "Show persisted task event log",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			bootstrap, err := app.NewBootstrapWithConfig(configPath)
+			if err != nil {
+				return fmt.Errorf("create bootstrap: %w", err)
+			}
+
+			events, err := internallogging.ReadAuditEvents(bootstrap.Config.StateDir+"/task-events.jsonl", limit)
+			if err != nil {
+				return fmt.Errorf("read task event log: %w", err)
+			}
+
+			printed := 0
+			for _, event := range events {
+				if event.Event != "task_event" {
+					continue
+				}
+				if taskID != "" && event.TaskID != taskID {
+					continue
+				}
+				if eventName != "" && !strings.Contains(strings.ToLower(event.Message), strings.ToLower(eventName)) {
+					continue
+				}
+				fmt.Fprintf(
+					cmd.OutOrStdout(),
+					"%s\ttask=%s\ttask_status=%s\titem=%s\titem_status=%s\tattempt=%d\tbytes=%d\tmessage=%s\terror=%s\n",
+					formatTimestamp(event.Time),
+					event.TaskID,
+					event.TaskStatus,
+					event.ItemPath,
+					event.ItemStatus,
+					event.Attempt,
+					event.Bytes,
+					event.Message,
+					event.Error,
+				)
+				printed++
+			}
+			if printed == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "no matching task events")
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&configPath, "config", "", "Path to config file")
+	cmd.Flags().StringVar(&taskID, "task-id", "", "Only show events for a task ID")
+	cmd.Flags().StringVar(&eventName, "match", "", "Only show events whose message contains this text")
+	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum number of recent events to load")
 	return cmd
 }
 

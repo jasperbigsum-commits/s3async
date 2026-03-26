@@ -37,6 +37,8 @@
 - Added `task events` command for recent execution-history inspection by task ID or message match.
 - Re-ran `go test ./...`, `go test -race ./...`, and `go build ./...` successfully after event-log changes.
 - Attempted mandatory GitHub code search via `gh search`, but local environment is not authenticated yet (`gh auth login` / `GH_TOKEN` required), so continued with local implementation review.
+- Added `cmd` package tests covering worker empty-queue output, daemon stop requests, task status failed-item output limits, and task event filtering / empty-log handling.
+- Refactored `task` command bootstrap creation to use the shared injectable bootstrap factory, enabling command-layer testing without bespoke wiring.
 
 ### Risks / Notes
 - Current async mode now has a queue-aware worker loop, but process launch is still detach-based rather than a managed OS service/daemon install.

@@ -116,5 +116,4 @@ go build ./...
 - convert detached worker launch into a first-class long-running daemon/service install mode
 - multipart upload and resume
 - retry jitter and selective retry policies
-- MinIO and compatible S3 endpoints
 - richer CLI integration tests for daemon/task observability flows

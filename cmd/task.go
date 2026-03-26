@@ -1,11 +1,12 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
-	"github.com/jasperbigsum-commits/s3async/internal/app"
 	internallogging "github.com/jasperbigsum-commits/s3async/internal/logging"
 	taskpkg "github.com/jasperbigsum-commits/s3async/internal/task"
 	"github.com/spf13/cobra"
@@ -29,7 +30,7 @@ func newTaskListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List tasks",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			bootstrap, err := app.NewBootstrapWithConfig(configPath)
+			bootstrap, err := newBootstrapWithConfig(configPath)
 			if err != nil {
 				return fmt.Errorf("create bootstrap: %w", err)
 			}
@@ -72,7 +73,7 @@ func newTaskStatusCmd() *cobra.Command {
 		Short: "Show task status",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			bootstrap, err := app.NewBootstrapWithConfig(configPath)
+			bootstrap, err := newBootstrapWithConfig(configPath)
 			if err != nil {
 				return fmt.Errorf("create bootstrap: %w", err)
 			}
@@ -147,7 +148,7 @@ func newTaskRetryCmd() *cobra.Command {
 		Short: "Retry a task by moving it back to queued state",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			bootstrap, err := app.NewBootstrapWithConfig(configPath)
+			bootstrap, err := newBootstrapWithConfig(configPath)
 			if err != nil {
 				return fmt.Errorf("create bootstrap: %w", err)
 			}
@@ -226,13 +227,17 @@ func newTaskEventsCmd() *cobra.Command {
 		Use:   "events",
 		Short: "Show persisted task event log",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			bootstrap, err := app.NewBootstrapWithConfig(configPath)
+			bootstrap, err := newBootstrapWithConfig(configPath)
 			if err != nil {
 				return fmt.Errorf("create bootstrap: %w", err)
 			}
 
 			events, err := internallogging.ReadAuditEvents(bootstrap.Config.StateDir+"/task-events.jsonl", limit)
 			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					fmt.Fprintln(cmd.OutOrStdout(), "no matching task events")
+					return nil
+				}
 				return fmt.Errorf("read task event log: %w", err)
 			}
 

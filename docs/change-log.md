@@ -18,6 +18,7 @@
 - SQLite tests covering richer task/item metrics persistence and queue claiming.
 - Focused task service tests covering repository failure propagation during per-item execution updates.
 - Persistent `task-events.jsonl` execution event log and `task events` CLI for recent task/item history inspection.
+- Command-package tests covering worker empty-queue messaging, daemon stop requests, task status failed-item limits, and task-event filtering/bootstrap error paths.
 
 ### Changed
 - Sync command now plans file items before creating tasks.

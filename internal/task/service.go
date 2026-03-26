@@ -3,6 +3,7 @@ package task
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -322,10 +323,7 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 						break
 					}
 
-					key := item.RelativePath
-					if t.Prefix != "" {
-						key = filepath.ToSlash(filepath.Join(t.Prefix, item.RelativePath))
-					}
+					key := normalizeObjectKey(t.Prefix, item.RelativePath)
 
 					uploadErr = uploader.UploadFile(t.Bucket, key, item.Path)
 					if uploadErr == nil {
@@ -437,4 +435,16 @@ func latestError(items []Item) string {
 		}
 	}
 	return ""
+}
+
+func normalizeObjectKey(prefix string, relativePath string) string {
+	normalizedPath := strings.TrimLeft(filepath.ToSlash(relativePath), "/")
+	trimmedPrefix := strings.Trim(filepath.ToSlash(prefix), "/")
+	if trimmedPrefix == "" {
+		return normalizedPath
+	}
+	if normalizedPath == "" {
+		return trimmedPrefix
+	}
+	return trimmedPrefix + "/" + normalizedPath
 }

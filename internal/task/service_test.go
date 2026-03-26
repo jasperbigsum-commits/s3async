@@ -428,6 +428,51 @@ func TestExecuteTaskRetriesThenSucceeds(t *testing.T) {
 	}
 }
 
+func TestExecuteTaskStripsLeadingSlashFromRootPrefix(t *testing.T) {
+	repo := newMemoryRepo()
+	service := NewService(repo, nil)
+	createdTask, err := service.CreateTask("./data", "bucket", "/", true, []Item{{Path: "a.txt", RelativePath: "nested/a.txt", Size: 1}})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	uploader := &fakeUploader{failures: map[string]int{}}
+	if err := service.ExecuteTask(createdTask.ID, uploader, ExecutionConfig{Workers: 1, MaxAttempts: 1}); err != nil {
+		t.Fatalf("ExecuteTask() error = %v", err)
+	}
+
+	if len(uploader.calls) != 1 {
+		t.Fatalf("upload calls = %d, want 1", len(uploader.calls))
+	}
+	if uploader.calls[0] != "nested/a.txt" {
+		t.Fatalf("upload key = %q, want %q", uploader.calls[0], "nested/a.txt")
+	}
+}
+
+func TestNormalizeObjectKey(t *testing.T) {
+	tests := []struct {
+		name         string
+		prefix       string
+		relativePath string
+		want         string
+	}{
+		{name: "empty prefix", prefix: "", relativePath: "nested/a.txt", want: "nested/a.txt"},
+		{name: "root prefix", prefix: "/", relativePath: "nested/a.txt", want: "nested/a.txt"},
+		{name: "trim prefix slashes only", prefix: "/backup/", relativePath: "nested/a.txt", want: "backup/nested/a.txt"},
+		{name: "trim relative leading slash", prefix: "backup", relativePath: "/nested/a.txt", want: "backup/nested/a.txt"},
+		{name: "preserve spaces in prefix", prefix: " backup ", relativePath: "nested/a.txt", want: " backup /nested/a.txt"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeObjectKey(tt.prefix, tt.relativePath)
+			if got != tt.want {
+				t.Fatalf("normalizeObjectKey(%q, %q) = %q, want %q", tt.prefix, tt.relativePath, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestExecuteTaskReturnsErrorWhenUpdateItemStatusFails(t *testing.T) {
 	repo := newMemoryRepo()
 	repo.failUpdateItemPath = "a.txt"

@@ -303,6 +303,8 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 		return nil
 	}
 
+	normalizedPrefix := normalizeObjectPrefix(t.Prefix)
+
 	for i := 0; i < cfg.Workers; i++ {
 		wg.Add(1)
 		go func() {
@@ -312,6 +314,7 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 					continue
 				}
 
+				key := joinObjectKey(normalizedPrefix, item.RelativePath)
 				var uploadErr error
 				for attempt := 1; attempt <= cfg.MaxAttempts; attempt++ {
 					if err := s.repo.UpdateItemStatus(t.ID, item.RelativePath, ItemStatusUploading, ""); err != nil {
@@ -322,8 +325,6 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 						setExecutionErr(fmt.Errorf("persist local uploading progress %s: %w", item.RelativePath, err))
 						break
 					}
-
-					key := normalizeObjectKey(t.Prefix, item.RelativePath)
 
 					uploadErr = uploader.UploadFile(t.Bucket, key, item.Path)
 					if uploadErr == nil {
@@ -437,14 +438,25 @@ func latestError(items []Item) string {
 	return ""
 }
 
-func normalizeObjectKey(prefix string, relativePath string) string {
-	normalizedPath := strings.TrimLeft(filepath.ToSlash(relativePath), "/")
-	trimmedPrefix := strings.Trim(filepath.ToSlash(prefix), "/")
-	if trimmedPrefix == "" {
+func normalizeObjectPrefix(prefix string) string {
+	return strings.Trim(slashifyPath(prefix), "/")
+}
+
+func joinObjectKey(prefix string, relativePath string) string {
+	normalizedPrefix := normalizeObjectPrefix(prefix)
+	normalizedPath := strings.TrimLeft(slashifyPath(relativePath), "/")
+	if normalizedPrefix == "" {
 		return normalizedPath
 	}
 	if normalizedPath == "" {
-		return trimmedPrefix
+		return normalizedPrefix
 	}
-	return trimmedPrefix + "/" + normalizedPath
+	return normalizedPrefix + "/" + normalizedPath
+}
+
+func slashifyPath(value string) string {
+	// filepath.ToSlash converts OS-specific separators, but it does not convert
+	// backslashes on non-Windows platforms. Convert remaining backslashes to make
+	// S3 object keys consistent.
+	return strings.ReplaceAll(filepath.ToSlash(value), "\\", "/")
 }

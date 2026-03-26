@@ -449,7 +449,29 @@ func TestExecuteTaskStripsLeadingSlashFromRootPrefix(t *testing.T) {
 	}
 }
 
-func TestNormalizeObjectKey(t *testing.T) {
+func TestNormalizeObjectPrefix(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+		want   string
+	}{
+		{name: "empty prefix", prefix: "", want: ""},
+		{name: "root prefix", prefix: "/", want: ""},
+		{name: "trim edge slashes", prefix: "/backup/", want: "backup"},
+		{name: "preserve spaces", prefix: " backup ", want: " backup "},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeObjectPrefix(tt.prefix)
+			if got != tt.want {
+				t.Fatalf("normalizeObjectPrefix(%q) = %q, want %q", tt.prefix, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestJoinObjectKey(t *testing.T) {
 	tests := []struct {
 		name         string
 		prefix       string
@@ -458,16 +480,17 @@ func TestNormalizeObjectKey(t *testing.T) {
 	}{
 		{name: "empty prefix", prefix: "", relativePath: "nested/a.txt", want: "nested/a.txt"},
 		{name: "root prefix", prefix: "/", relativePath: "nested/a.txt", want: "nested/a.txt"},
-		{name: "trim prefix slashes only", prefix: "/backup/", relativePath: "nested/a.txt", want: "backup/nested/a.txt"},
+		{name: "trim edge slashes", prefix: "/backup/", relativePath: "nested/a.txt", want: "backup/nested/a.txt"},
 		{name: "trim relative leading slash", prefix: "backup", relativePath: "/nested/a.txt", want: "backup/nested/a.txt"},
-		{name: "preserve spaces in prefix", prefix: " backup ", relativePath: "nested/a.txt", want: " backup /nested/a.txt"},
+		{name: "empty relative path returns prefix", prefix: "backup", relativePath: "", want: "backup"},
+		{name: "convert single windows separator", prefix: "backup", relativePath: "nested\\a.txt", want: "backup/nested/a.txt"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := normalizeObjectKey(tt.prefix, tt.relativePath)
+			got := joinObjectKey(tt.prefix, tt.relativePath)
 			if got != tt.want {
-				t.Fatalf("normalizeObjectKey(%q, %q) = %q, want %q", tt.prefix, tt.relativePath, got, tt.want)
+				t.Fatalf("joinObjectKey(%q, %q) = %q, want %q", tt.prefix, tt.relativePath, got, tt.want)
 			}
 		})
 	}

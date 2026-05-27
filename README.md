@@ -112,6 +112,78 @@ go test -cover ./...
 go build ./...
 ```
 
+## 构建（Windows 与 Linux）
+
+项目提供了示例构建脚本，支持在本地或在 WSL/CI 中交叉编译为 Windows 可执行文件。
+
+### 构建输出目录
+
+所有构建产物都统一输出到 `dist/` 文件夹（脚本会自动创建）：
+- `dist/s3async.exe` — Windows 可执行文件
+- `dist/s3async` — Linux 可执行文件
+
+### Windows 构建
+
+使用 `scripts/build-windows.ps1` 构建 Windows 可执行文件：
+
+```powershell
+# 默认构建：生成 dist/s3async.exe
+.\scripts\build-windows.ps1
+
+# 指定输出名称
+.\scripts\build-windows.ps1 -Out myapp
+# 生成 dist/myapp.exe
+
+# 创建 release 包
+.\scripts\build-windows.ps1 -Out s3async -Release
+# 生成 dist/s3async-windows-amd64.zip
+```
+
+**C 编译器要求：** Windows 下如果出现 `cgo: C compiler "gcc" not found`，说明没有可用的 C 编译器。推荐安装 MSYS2 并使用 mingw-w64：
+
+```powershell
+# 安装 MSYS2 后，在 MSYS2 shell 中运行
+pacman -Syu
+pacman -S mingw-w64-x86_64-gcc
+```
+
+然后将 MSYS2 的 `mingw64\bin` 添加到系统 `PATH`，或者在 PowerShell 中先设置：
+
+```powershell
+$env:PATH += ";C:\msys64\mingw64\bin"
+```
+
+重新运行脚本即可。
+
+### Linux 构建
+
+使用 `scripts/build-linux.sh` 构建 Linux 可执行文件，或交叉编译为 Windows：
+
+```bash
+chmod +x scripts/build-linux.sh
+
+# 默认构建 Linux：生成 dist/s3async
+./scripts/build-linux.sh
+
+# 指定输出名称
+./scripts/build-linux.sh --out myapp
+# 生成 dist/myapp
+
+# 交叉编译为 Windows（需要 mingw-w64）
+./scripts/build-linux.sh --target windows --out s3async
+# 生成 dist/s3async.exe
+```
+
+### 依赖说明
+
+本项目使用 `github.com/mattn/go-sqlite3`，该驱动依赖 CGO 与系统 C 编译器。如果要在 CI 中交叉编译，请确保安装并配置了对应的 mingw 工具链，或考虑替换为纯 Go 驱动（例如 `modernc.org/sqlite`）以避免 CGO。
+
+### 依赖说明
+
+本项目使用 `github.com/mattn/go-sqlite3`，该驱动依赖 CGO 与系统 C 编译器。如果要在 CI 中交叉编译，请确保安装并配置了对应的 mingw 工具链，或考虑替换为纯 Go 驱动（例如 `modernc.org/sqlite`）以避免 CGO。
+
+
+
 ## Current TODOs
 - convert detached worker launch into a first-class long-running daemon/service install mode
 - multipart upload and resume

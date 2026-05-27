@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"runtime"
-	"syscall"
 	"time"
 
 	internaldaemon "github.com/jasperbigsum-commits/s3async/internal/daemon"
@@ -226,9 +224,7 @@ func spawnDaemon(configPath string) error {
 	proc.Stderr = nil
 	proc.Stdin = nil
 
-	if runtime.GOOS != "windows" {
-		proc.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	}
+	configSysProcAttr(proc)
 
 	if err := proc.Start(); err != nil {
 		if running && pid > 0 {

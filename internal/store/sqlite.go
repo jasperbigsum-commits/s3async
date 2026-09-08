@@ -448,7 +448,7 @@ func (r *SQLiteTaskRepository) UpdateItemStatus(taskID string, relativePath stri
 
 	startedExpr := "started_at"
 	attemptIncrement := "attempt_count"
-	if status == task.ItemStatusUploading {
+	if status == task.ItemStatusUploading || status == task.ItemStatusDownloading {
 		startedExpr = "COALESCE(started_at, ?)"
 		attemptIncrement = "attempt_count + 1"
 	}
@@ -464,7 +464,7 @@ func (r *SQLiteTaskRepository) UpdateItemStatus(taskID string, relativePath stri
 		WHERE task_id = ? AND relative_path = ?`, attemptIncrement, startedExpr)
 
 	args := []any{string(status), errMsg, now}
-	if status == task.ItemStatusUploading {
+	if status == task.ItemStatusUploading || status == task.ItemStatusDownloading {
 		args = append(args, now)
 	}
 	args = append(args, completedAt, taskID, relativePath)

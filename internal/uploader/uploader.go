@@ -24,25 +24,25 @@ type Client struct {
 
 // clientOptions holds the resolved options for building the S3 client
 type clientOptions struct {
-	region         string
-	profile        string
-	endpoint       string
-	forcePathStyle bool
-	skipTLSVerify  bool
-	caCertFile     string
-	accessKeyID    string
+	region          string
+	profile         string
+	endpoint        string
+	forcePathStyle  bool
+	skipTLSVerify   bool
+	caCertFile      string
+	accessKeyID     string
 	secretAccessKey string
 }
 
 func buildClientOptions(cfg cfgpkg.Config) clientOptions {
 	return clientOptions{
-		region:         cfg.S3.Region,
-		profile:        cfg.S3.Profile,
-		endpoint:       cfg.S3.Endpoint,
-		forcePathStyle: cfg.S3.ForcePathStyle,
-		skipTLSVerify:  cfg.S3.SkipTLSVerify,
-		caCertFile:     cfg.S3.CACertFile,
-		accessKeyID:    cfg.S3.StaticCredentials.AccessKeyID,
+		region:          cfg.S3.Region,
+		profile:         cfg.S3.Profile,
+		endpoint:        cfg.S3.Endpoint,
+		forcePathStyle:  cfg.S3.ForcePathStyle,
+		skipTLSVerify:   cfg.S3.SkipTLSVerify,
+		caCertFile:      cfg.S3.CACertFile,
+		accessKeyID:     cfg.S3.StaticCredentials.AccessKeyID,
 		secretAccessKey: cfg.S3.StaticCredentials.SecretAccessKey,
 	}
 }
@@ -91,13 +91,7 @@ func buildLoadOptions(ctx context.Context, opts clientOptions) ([]func(*awsconfi
 }
 
 func New(ctx context.Context, cfg cfgpkg.Config) (*Client, error) {
-	// Use S3 config (already normalized from legacy fields)
-	s3Cfg := cfg.S3
-	if s3Cfg.Bucket == "" {
-		s3Cfg.Bucket = cfg.Bucket
-	}
-
-	if cfg.Security.DryRun || s3Cfg.Bucket == "" {
+	if cfg.Security.DryRun {
 		return &Client{dryRun: true, timeout: 30 * time.Second}, nil
 	}
 
@@ -128,7 +122,7 @@ func New(ctx context.Context, cfg cfgpkg.Config) (*Client, error) {
 		})
 	}
 
-	return &Client{s3: s3.NewFromConfig(awsCfg, s3Opts...), dryRun: false, timeout: 30 * time.Second}, nil
+	return &Client{s3: s3.NewFromConfig(awsCfg, s3Opts...), dryRun: cfg.Security.DryRun, timeout: 30 * time.Second}, nil
 }
 
 func (c *Client) UploadFile(bucket string, key string, localPath string) error {

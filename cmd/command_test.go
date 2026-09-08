@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +16,7 @@ import (
 	"github.com/jasperbigsum-commits/s3async/internal/store"
 	taskpkg "github.com/jasperbigsum-commits/s3async/internal/task"
 )
+
 func TestTaskWorkerOnceWithoutQueuedTasks(t *testing.T) {
 	configPath, _, _ := writeTestConfig(t)
 
@@ -294,5 +297,84 @@ func recordEvents(t *testing.T, recorder *internallogging.FileAuditRecorder, eve
 		if err := recorder.Record(event); err != nil {
 			t.Fatalf("Record() error = %v", err)
 		}
+	}
+}
+
+func TestReverseSyncPersistsDirectionAndRetries(t *testing.T) {
+	var fail bool = true
+	var gets int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("unexpected method %s", r.Method)
+			w.WriteHeader(405)
+			return
+		}
+		if r.URL.Query().Get("list-type") == "2" {
+			fmt.Fprint(w, `<ListBucketResult><Contents><Key>backup/nested/a.txt</Key><Size>5</Size></Contents></ListBucketResult>`)
+			return
+		}
+		gets++
+		if r.URL.Path != "/bucket/backup/nested/a.txt" {
+			t.Errorf("key path %s", r.URL.Path)
+		}
+		if fail {
+			w.WriteHeader(403)
+			fmt.Fprint(w, `<Error><Code>AccessDenied</Code></Error>`)
+			return
+		}
+		fmt.Fprint(w, "hello")
+	}))
+	defer server.Close()
+	state := t.TempDir()
+	configPath := filepath.Join(state, "config.yaml")
+	dbPath := filepath.Join(state, "tasks.db")
+	config := fmt.Sprintf("database_path: %q\nstate_dir: %q\nworkers: 2\nretry:\n  max_attempts: 2\n  backoff_ms: 0\ns3:\n  region: us-east-1\n  endpoint: %q\n  force_path_style: true\n  static_credentials:\n    access_key_id: test\n    secret_access_key: test\n", dbPath, state, server.URL)
+	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(state, "output")
+	_, _, err := executeCommand(NewRootCmd(), "sync", destination, "--download", "--bucket", "bucket", "--prefix", "backup", "--async=false", "--config", configPath)
+	if err == nil || !strings.Contains(err.Error(), "download failed") {
+		t.Fatalf("expected failed download, got %v", err)
+	}
+	repo, err := store.NewSQLiteTaskRepository(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := repo.List()
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("tasks=%v error=%v", tasks, err)
+	}
+	record := tasks[0]
+	if record.Mode != "download" || record.Status != taskpkg.StatusFailed || gets != 2 {
+		t.Fatalf("task=%+v gets=%d", record, gets)
+	}
+	items, err := repo.ListItems(record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items[0].AttemptCount != 2 {
+		t.Fatalf("attempts=%d", items[0].AttemptCount)
+	}
+	// Reload through a separate bootstrap, as a worker does after process restart.
+	bootstrap, err := app.NewBootstrapWithConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bootstrap.TaskService.RetryTask(record.ID); err != nil {
+		t.Fatal(err)
+	}
+	fail = false
+	_, _, err = executeCommand(NewRootCmd(), "task", "worker", "--once", "--config", configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(destination, "nested", "a.txt"))
+	if err != nil || string(data) != "hello" {
+		t.Fatalf("data=%q error=%v", data, err)
+	}
+	record, err = repo.Get(record.ID)
+	if err != nil || record.Status != taskpkg.StatusCompleted || record.SuccessBytes != 5 {
+		t.Fatalf("task=%+v error=%v", record, err)
 	}
 }

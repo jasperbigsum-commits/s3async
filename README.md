@@ -3,6 +3,7 @@
 `s3async` is a secure, efficient, cross-platform asynchronous S3 sync CLI for Windows and Linux.
 
 ## Current scope
+- Upload local files or download S3 prefixes into local directories
 - Async sync task creation
 - SQLite persistence for tasks and task items
 - Source directory scan with include/exclude filtering
@@ -40,6 +41,27 @@ go run . task events --task-id <task-id> --limit 100
 go run . daemon status
 go run . validate --config examples/config.yaml
 ```
+
+## 从 S3 反向同步到本地
+
+```bash
+# 前台下载：backup/reports/a.txt → ./restore/reports/a.txt
+s3async sync ./restore --download --bucket my-bucket --prefix backup/ --async=false
+
+# 后台下载，复用任务队列、并发数和重试配置
+s3async sync ./restore --download --config examples/config.yaml --async
+
+# 只下载匹配文件；显式空前缀表示整个桶，覆盖配置中的 prefix
+s3async sync ./restore --download --bucket my-bucket --prefix "" --include "*.txt" --exclude "private/*"
+```
+
+`--download` 将本地路径解释为目标目录，自动创建所需子目录。`--bucket`、`--prefix`、配置文件和环境变量的解析方式与上传一致。前缀按目录处理（`backup` 与 `backup/` 等价），过滤规则作用于去掉前缀后的相对路径；跳过 S3 目录标记。
+
+每次任务会下载所有匹配对象并覆盖本地同名文件，不删除本地多余文件，也不按时间或校验和跳过文件。先写入同目录临时文件，完整接收后再替换目标文件；下载失败保留原文件并清理临时文件。保留 S3 返回的最后修改时间。拒绝路径穿越、目标路径中的符号链接、仅大小写不同的重名对象以及文件/目录冲突。
+
+下载方向存储在任务中，`task run`、`task retry` 和后台 worker 会继续执行下载。`task status` 显示 `mode: download` 和 `items_downloading`。为兼容现有数据库，传输中的计数沿用数据库的 `uploading_items` / `uploading_bytes` 字段。
+
+`security.dry_run: true` 仍需连接 S3 列举对象，但不会创建或覆盖本地文件。下载需要 `s3:ListBucket` 和 `s3:GetObject` 权限。当前每次列举请求及单个文件下载超时为 30 秒；失败重试从文件开头重新下载，不支持断点续传。
 
 ## Configuration
 See `examples/config.yaml`.

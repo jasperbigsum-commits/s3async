@@ -18,11 +18,12 @@ const (
 )
 
 const (
-	ItemStatusPending   ItemStatus = "pending"
-	ItemStatusUploading ItemStatus = "uploading"
-	ItemStatusSuccess   ItemStatus = "success"
-	ItemStatusFailed    ItemStatus = "failed"
-	ItemStatusSkipped   ItemStatus = "skipped"
+	ItemStatusPending     ItemStatus = "pending"
+	ItemStatusUploading   ItemStatus = "uploading"
+	ItemStatusDownloading ItemStatus = "downloading"
+	ItemStatusSuccess     ItemStatus = "success"
+	ItemStatusFailed      ItemStatus = "failed"
+	ItemStatusSkipped     ItemStatus = "skipped"
 )
 
 type Summary struct {
@@ -159,7 +160,7 @@ func incrementSummaryStatus(summary *Summary, status ItemStatus, size int64) {
 	case ItemStatusPending:
 		summary.PendingItems++
 		summary.PendingBytes += size
-	case ItemStatusUploading:
+	case ItemStatusUploading, ItemStatusDownloading:
 		summary.UploadingItems++
 		summary.UploadingBytes += size
 	case ItemStatusSuccess:
@@ -183,7 +184,7 @@ func decrementSummaryStatus(summary *Summary, status ItemStatus, size int64) {
 		if summary.PendingBytes >= size {
 			summary.PendingBytes -= size
 		}
-	case ItemStatusUploading:
+	case ItemStatusUploading, ItemStatusDownloading:
 		if summary.UploadingItems > 0 {
 			summary.UploadingItems--
 		}

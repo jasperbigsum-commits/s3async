@@ -7,10 +7,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
-	internaldaemon "github.com/jasperbigsum-commits/s3async/internal/daemon"
 	"github.com/jasperbigsum-commits/s3async/internal/app"
+	internaldaemon "github.com/jasperbigsum-commits/s3async/internal/daemon"
 	"github.com/jasperbigsum-commits/s3async/internal/filter"
 	"github.com/jasperbigsum-commits/s3async/internal/scanner"
 	"github.com/jasperbigsum-commits/s3async/internal/task"
@@ -29,13 +30,14 @@ func newSyncCmd() *cobra.Command {
 	var bucket string
 	var prefix string
 	var async bool
+	var download bool
 	var configPath string
 	var include []string
 	var exclude []string
 
 	cmd := &cobra.Command{
-		Use:   "sync <source>",
-		Short: "Create a sync task",
+		Use:   "sync <local-path>",
+		Short: "Sync local files to S3, or download S3 files with --download",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			bootstrap, err := newBootstrapWithConfig(configPath)
@@ -49,7 +51,7 @@ func newSyncCmd() *cobra.Command {
 				resolvedBucket = bootstrap.Config.Bucket
 			}
 			resolvedPrefix := prefix
-			if resolvedPrefix == "" {
+			if !cmd.Flags().Changed("prefix") {
 				resolvedPrefix = bootstrap.Config.Prefix
 			}
 			resolvedInclude := include
@@ -64,26 +66,41 @@ func newSyncCmd() *cobra.Command {
 				return fmt.Errorf("bucket is required via --bucket, config file, or S3ASYNC_BUCKET")
 			}
 
-			entries, err := scanner.Scan(source)
-			if err != nil {
-				return fmt.Errorf("scan source: %w", err)
-			}
-
-			items := make([]task.Item, 0, len(entries))
-			for _, entry := range entries {
-				if !filter.Match(entry.RelativePath, resolvedInclude, resolvedExclude) {
-					continue
-				}
-				items = append(items, task.Item{
-					Path:         entry.Path,
-					RelativePath: entry.RelativePath,
-					Size:         entry.Size,
-					Status:       task.ItemStatusPending,
-				})
-			}
-
+			var items []task.Item
 			service := bootstrap.TaskService
-			createdTask, err := service.CreateTask(source, resolvedBucket, resolvedPrefix, async, items)
+			var createdTask task.Task
+			if download {
+				source, err = filepath.Abs(source)
+				if err != nil {
+					return fmt.Errorf("resolve destination: %w", err)
+				}
+				// Listing is read-only and required even for dry-run planning.
+				cfg := bootstrap.Config
+				cfg.Bucket, cfg.S3.Bucket = resolvedBucket, resolvedBucket
+				cfg.Security.DryRun = false
+				client, clientErr := uploader.New(cmd.Context(), cfg)
+				if clientErr != nil {
+					return fmt.Errorf("create S3 client: %w", clientErr)
+				}
+				items, err = client.PlanDownload(cmd.Context(), resolvedBucket, resolvedPrefix, source, resolvedInclude, resolvedExclude)
+				if err != nil {
+					return fmt.Errorf("plan download: %w", err)
+				}
+				createdTask, err = service.CreateDownloadTask(source, resolvedBucket, resolvedPrefix, async, items)
+			} else {
+				entries, scanErr := scanner.Scan(source)
+				if scanErr != nil {
+					return fmt.Errorf("scan source: %w", scanErr)
+				}
+				for _, entry := range entries {
+					if !filter.Match(entry.RelativePath, resolvedInclude, resolvedExclude) {
+						continue
+					}
+					items = append(items, task.Item{Path: entry.Path, RelativePath: entry.RelativePath, Size: entry.Size, Status: task.ItemStatusPending})
+				}
+				createdTask, err = service.CreateTask(source, resolvedBucket, resolvedPrefix, async, items)
+			}
+
 			if err != nil {
 				return fmt.Errorf("create task: %w", err)
 			}
@@ -113,13 +130,25 @@ func newSyncCmd() *cobra.Command {
 				return fmt.Errorf("run task: %w", err)
 			}
 
-			fmt.Fprintln(cmd.OutOrStdout(), "foreground upload completed")
+			if download {
+				finished, err := service.GetTask(createdTask.ID)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "foreground download finished: %s\n", finished.Status)
+				if finished.Status == task.StatusFailed || finished.Status == task.StatusPartialFailed {
+					return fmt.Errorf("download failed: %s", finished.LastError)
+				}
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "foreground upload completed")
+			}
 			return nil
 		},
 	}
 
-	cmd.Flags().StringVar(&bucket, "bucket", "", "Target S3 bucket")
-	cmd.Flags().StringVar(&prefix, "prefix", "", "Target S3 prefix")
+	cmd.Flags().BoolVar(&download, "download", false, "Download S3 prefix into the local directory")
+	cmd.Flags().StringVar(&bucket, "bucket", "", "S3 bucket")
+	cmd.Flags().StringVar(&prefix, "prefix", "", "S3 directory prefix")
 	cmd.Flags().BoolVar(&async, "async", true, "Submit task in async mode")
 	cmd.Flags().StringVar(&configPath, "config", "", "Path to config file")
 	cmd.Flags().StringSliceVar(&include, "include", nil, "Include glob patterns")

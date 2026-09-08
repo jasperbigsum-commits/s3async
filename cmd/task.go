@@ -90,12 +90,17 @@ func newTaskStatusCmd() *cobra.Command {
 
 			fmt.Fprintf(cmd.OutOrStdout(), "id: %s\n", t.ID)
 			fmt.Fprintf(cmd.OutOrStdout(), "status: %s\n", t.Status)
+			fmt.Fprintf(cmd.OutOrStdout(), "mode: %s\n", t.Mode)
 			fmt.Fprintf(cmd.OutOrStdout(), "source: %s\n", t.Source)
 			fmt.Fprintf(cmd.OutOrStdout(), "bucket: %s\n", t.Bucket)
 			fmt.Fprintf(cmd.OutOrStdout(), "prefix: %s\n", t.Prefix)
 			fmt.Fprintf(cmd.OutOrStdout(), "items_total: %d\n", t.TotalItems)
 			fmt.Fprintf(cmd.OutOrStdout(), "items_pending: %d\n", t.PendingItems)
-			fmt.Fprintf(cmd.OutOrStdout(), "items_uploading: %d\n", t.UploadingItems)
+			if t.Mode == "download" {
+				fmt.Fprintf(cmd.OutOrStdout(), "items_downloading: %d\n", t.UploadingItems)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "items_uploading: %d\n", t.UploadingItems)
+			}
 			fmt.Fprintf(cmd.OutOrStdout(), "items_success: %d\n", t.SuccessItems)
 			fmt.Fprintf(cmd.OutOrStdout(), "items_failed: %d\n", t.FailedItems)
 			fmt.Fprintf(cmd.OutOrStdout(), "items_skipped: %d\n", t.SkippedItems)

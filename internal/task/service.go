@@ -24,6 +24,10 @@ type Uploader interface {
 	UploadFile(bucket string, key string, localPath string) error
 }
 
+type Downloader interface {
+	DownloadFile(bucket string, key string, root string, relativePath string) error
+}
+
 type ExecutionConfig struct {
 	Workers     int
 	MaxAttempts int
@@ -49,6 +53,14 @@ func (s *Service) emitEvent(eventType string, t Task, item Item, items []Item, c
 }
 
 func (s *Service) CreateTask(source string, bucket string, prefix string, async bool, items []Item) (Task, error) {
+	return s.createTask(source, bucket, prefix, "update", async, items)
+}
+
+func (s *Service) CreateDownloadTask(destination, bucket, prefix string, async bool, items []Item) (Task, error) {
+	return s.createTask(destination, bucket, prefix, "download", async, items)
+}
+
+func (s *Service) createTask(source, bucket, prefix, mode string, async bool, items []Item) (Task, error) {
 	status := StatusQueued
 	if !async {
 		status = StatusPending
@@ -60,7 +72,7 @@ func (s *Service) CreateTask(source string, bucket string, prefix string, async 
 		Source:    source,
 		Bucket:    bucket,
 		Prefix:    prefix,
-		Mode:      "update",
+		Mode:      mode,
 		Status:    status,
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -191,6 +203,18 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 	if uploader == nil {
 		return fmt.Errorf("uploader is required")
 	}
+	activeStatus := ItemStatusUploading
+	transfer := func(item Item, key string) error { return uploader.UploadFile(t.Bucket, key, item.Path) }
+	if t.Mode == "download" {
+		downloader, ok := uploader.(Downloader)
+		if !ok {
+			return fmt.Errorf("client does not support downloads")
+		}
+		activeStatus = ItemStatusDownloading
+		transfer = func(item Item, key string) error {
+			return downloader.DownloadFile(t.Bucket, key, t.Source, item.RelativePath)
+		}
+	}
 	if cfg.Workers <= 0 {
 		cfg.Workers = 1
 	}
@@ -285,7 +309,7 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 			items[i].Error = errMsg
 			items[i].UpdatedAt = now
 			switch status {
-			case ItemStatusUploading:
+			case ItemStatusUploading, ItemStatusDownloading:
 				items[i].AttemptCount++
 				items[i].StartedAt = &now
 				items[i].CompletedAt = nil
@@ -305,6 +329,14 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 
 	normalizedPrefix := normalizeObjectPrefix(t.Prefix)
 
+	for _, item := range items {
+		if item.Status == ItemStatusSuccess || item.Status == ItemStatusSkipped {
+			continue
+		}
+		workCh <- item
+	}
+	close(workCh)
+
 	for i := 0; i < cfg.Workers; i++ {
 		wg.Add(1)
 		go func() {
@@ -315,19 +347,19 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 				}
 
 				key := joinObjectKey(normalizedPrefix, item.RelativePath)
-				var uploadErr error
+				var transferErr error
 				for attempt := 1; attempt <= cfg.MaxAttempts; attempt++ {
-					if err := s.repo.UpdateItemStatus(t.ID, item.RelativePath, ItemStatusUploading, ""); err != nil {
-						setExecutionErr(fmt.Errorf("mark item uploading %s: %w", item.RelativePath, err))
+					if err := s.repo.UpdateItemStatus(t.ID, item.RelativePath, activeStatus, ""); err != nil {
+						setExecutionErr(fmt.Errorf("mark item transferring %s: %w", item.RelativePath, err))
 						break
 					}
-					if err := updateLocalItem(item.RelativePath, ItemStatusUploading, ""); err != nil {
-						setExecutionErr(fmt.Errorf("persist local uploading progress %s: %w", item.RelativePath, err))
+					if err := updateLocalItem(item.RelativePath, activeStatus, ""); err != nil {
+						setExecutionErr(fmt.Errorf("persist local transfer progress %s: %w", item.RelativePath, err))
 						break
 					}
 
-					uploadErr = uploader.UploadFile(t.Bucket, key, item.Path)
-					if uploadErr == nil {
+					transferErr = transfer(item, key)
+					if transferErr == nil {
 						if err := s.repo.UpdateItemStatus(t.ID, item.RelativePath, ItemStatusSuccess, ""); err != nil {
 							setExecutionErr(fmt.Errorf("mark item success %s: %w", item.RelativePath, err))
 							break
@@ -346,12 +378,12 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 				if getExecutionErr() != nil {
 					continue
 				}
-				if uploadErr != nil {
-					if err := s.repo.UpdateItemStatus(t.ID, item.RelativePath, ItemStatusFailed, uploadErr.Error()); err != nil {
+				if transferErr != nil {
+					if err := s.repo.UpdateItemStatus(t.ID, item.RelativePath, ItemStatusFailed, transferErr.Error()); err != nil {
 						setExecutionErr(fmt.Errorf("mark item failed %s: %w", item.RelativePath, err))
 						continue
 					}
-					if err := updateLocalItem(item.RelativePath, ItemStatusFailed, uploadErr.Error()); err != nil {
+					if err := updateLocalItem(item.RelativePath, ItemStatusFailed, transferErr.Error()); err != nil {
 						setExecutionErr(fmt.Errorf("persist local failed progress %s: %w", item.RelativePath, err))
 					}
 				}
@@ -359,13 +391,6 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 		}()
 	}
 
-	for _, item := range items {
-		if item.Status == ItemStatusSuccess || item.Status == ItemStatusSkipped {
-			continue
-		}
-		workCh <- item
-	}
-	close(workCh)
 	wg.Wait()
 
 	if err := getExecutionErr(); err != nil {

@@ -40,20 +40,18 @@ func newTaskListCmd() *cobra.Command {
 				return fmt.Errorf("list tasks: %w", err)
 			}
 
-			for _, task := range tasks {
-				fmt.Fprintf(
-					cmd.OutOrStdout(),
-					"%s\t%s\titems=%d/%d failed=%d pending=%d running=%d\tupdated=%s\tsource=%s\n",
-					task.ID,
-					task.Status,
-					task.SuccessItems+task.SkippedItems,
-					task.TotalItems,
-					task.FailedItems,
-					task.PendingItems,
-					task.UploadingItems,
-					formatTimestamp(task.UpdatedAt),
-					task.Source,
-				)
+			if len(tasks) == 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "no tasks found in database: %s\n", bootstrap.Config.DatabasePath)
+				fmt.Fprintln(cmd.OutOrStdout(), "Use the same --config file used to create the sync task.")
+				return nil
+			}
+			for _, t := range tasks {
+				source, destination, direction := taskEndpoints(t)
+				fmt.Fprintf(cmd.OutOrStdout(),
+					"%s\t%s\tdirection=%s\titems=%d/%d failed=%d pending=%d running=%d\tbytes=%d/%d\tupdated=%s\tsource=%s\tdestination=%s\n",
+					t.ID, t.Status, direction, t.SuccessItems+t.SkippedItems, t.TotalItems,
+					t.FailedItems, t.PendingItems, t.UploadingItems, t.SuccessBytes+t.SkippedBytes, t.TotalBytes,
+					formatTimestamp(t.UpdatedAt), source, destination)
 			}
 
 			return nil
@@ -62,6 +60,19 @@ func newTaskListCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&configPath, "config", "", "Path to config file")
 	return cmd
+}
+
+// Legacy update tasks transfer local files to S3; download tasks reverse the endpoints.
+func taskEndpoints(t taskpkg.Task) (source, destination, direction string) {
+	remote := "s3://" + t.Bucket + "/"
+	prefix := strings.Trim(strings.ReplaceAll(t.Prefix, "\\", "/"), "/")
+	if prefix != "" {
+		remote += prefix + "/"
+	}
+	if t.Mode == "download" {
+		return remote, t.Source, "download"
+	}
+	return t.Source, remote, "upload"
 }
 
 func newTaskStatusCmd() *cobra.Command {
@@ -91,7 +102,10 @@ func newTaskStatusCmd() *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "id: %s\n", t.ID)
 			fmt.Fprintf(cmd.OutOrStdout(), "status: %s\n", t.Status)
 			fmt.Fprintf(cmd.OutOrStdout(), "mode: %s\n", t.Mode)
-			fmt.Fprintf(cmd.OutOrStdout(), "source: %s\n", t.Source)
+			source, destination, direction := taskEndpoints(t)
+			fmt.Fprintf(cmd.OutOrStdout(), "direction: %s\n", direction)
+			fmt.Fprintf(cmd.OutOrStdout(), "source: %s\n", source)
+			fmt.Fprintf(cmd.OutOrStdout(), "destination: %s\n", destination)
 			fmt.Fprintf(cmd.OutOrStdout(), "bucket: %s\n", t.Bucket)
 			fmt.Fprintf(cmd.OutOrStdout(), "prefix: %s\n", t.Prefix)
 			fmt.Fprintf(cmd.OutOrStdout(), "items_total: %d\n", t.TotalItems)

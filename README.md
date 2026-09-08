@@ -1,6 +1,6 @@
 # s3async
 
-`s3async` is a secure, efficient, cross-platform asynchronous S3 sync CLI for Windows and Linux.
+`s3async` is a secure, efficient, cross-platform asynchronous S3 sync CLI for macOS, Windows and Linux.
 
 ## Current scope
 - Upload local files or download S3 prefixes into local directories
@@ -58,6 +58,15 @@ s3async sync ./restore --download --bucket my-bucket --prefix "" --include "*.tx
 `--download` 将本地路径解释为目标目录，自动创建所需子目录。`--bucket`、`--prefix`、配置文件和环境变量的解析方式与上传一致。前缀按目录处理（`backup` 与 `backup/` 等价），过滤规则作用于去掉前缀后的相对路径；跳过 S3 目录标记。
 
 每次任务会下载所有匹配对象并覆盖本地同名文件，不删除本地多余文件，也不按时间或校验和跳过文件。先写入同目录临时文件，完整接收后再替换目标文件；下载失败保留原文件并清理临时文件。保留 S3 返回的最后修改时间。拒绝路径穿越、目标路径中的符号链接、仅大小写不同的重名对象以及文件/目录冲突。
+
+查询任务时应使用创建任务时的同一份配置，否则可能查询到另一个数据库：
+
+```bash
+go run . task list --config examples/config-xc.yaml
+go run . task status <task-id> --config examples/config-xc.yaml
+```
+
+`task list` 显示 `direction=upload/download`、来源、目标、文件数与已成功传输/跳过文件的字节数；空列表会提示当前数据库路径。字节数按文件完成后累计，并非实时网络传输速率。
 
 下载方向存储在任务中，`task run`、`task retry` 和后台 worker 会继续执行下载。`task status` 显示 `mode: download` 和 `items_downloading`。为兼容现有数据库，传输中的计数沿用数据库的 `uploading_items` / `uploading_bytes` 字段。
 
@@ -133,6 +142,37 @@ go test -race ./...
 go test -cover ./...
 go build ./...
 ```
+
+## GitHub 自动发布
+
+推送符合语义化版本规范的 `v` 前缀 tag 后，`.github/workflows/release.yml` 自动测试、构建并发布 GitHub Release。普通分支推送和 PR 不发布版本；以 `v` 开头但格式非法的 tag 会被校验拒绝。
+
+```bash
+# 先将代码及流水线提交并推送到 GitHub，再创建版本 tag
+git tag -a v1.2.3 -m "Release v1.2.3"
+git push origin v1.2.3
+
+# 预发布示例（自动标记为 GitHub Pre-release）
+git tag -a v1.3.0-rc.1 -m "Release v1.3.0-rc.1"
+git push origin v1.3.0-rc.1
+```
+
+正式版本使用 `v主版本.次版本.修订版本`，例如 `v1.2.3`；不使用 `v1.2` 或 `v01.2.3`。已发布版本不覆盖或移动 tag，修复后递增版本号。
+
+每个 Release 包含以下文件（以 `v1.2.3` 为例）：
+
+| 平台 | 发布文件 | 包内可执行程序 |
+| --- | --- | --- |
+| macOS Apple Silicon / ARM64 | `s3async_v1.2.3_darwin_arm64.tar.gz` | `s3async` |
+| Linux AMD64 | `s3async_v1.2.3_linux_amd64.tar.gz` | `s3async` |
+| Windows AMD64 | `s3async_v1.2.3_windows_amd64.zip` | `s3async.exe` |
+| SHA256 校验和 | `SHA256SUMS.txt` | — |
+
+压缩包同时附带 README 和 `config.example.yaml`。解压后通过 `./s3async version`（Windows：`.\s3async.exe version`）检查版本，输出与 tag 一致。Linux 下可将三个压缩包与校验文件放在同一目录执行 `sha256sum -c SHA256SUMS.txt` 验证完整性。
+
+三个平台分别使用原生 runner 并启用 CGO，所有平台测试及 Linux race 检查通过后才发布。Linux 产物在 Ubuntu 22.04 上构建，面向 glibc 2.35+ 环境，不是适用于 Alpine/musl 的静态程序。macOS 产物未做 Apple 签名和公证。
+
+仓库需启用 GitHub Actions，并允许发布 job 使用 `GITHUB_TOKEN` 的 `contents: write` 权限；无需额外配置 PAT 或云服务密钥。下载地址为仓库的 [Releases 页面](https://github.com/jasperbigsum-commits/s3async/releases)。上传失败时可重跑流水线完成草稿发布，已公开发布的版本则拒绝覆盖。
 
 ## 构建（Windows 与 Linux）
 

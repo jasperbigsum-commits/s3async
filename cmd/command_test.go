@@ -378,3 +378,52 @@ func TestReverseSyncPersistsDirectionAndRetries(t *testing.T) {
 		t.Fatalf("task=%+v error=%v", record, err)
 	}
 }
+
+func TestTaskListShowsBothDirectionsFromConfiguredDatabase(t *testing.T) {
+	configPath, _, dbPath := writeTestConfig(t)
+	repo, err := store.NewSQLiteTaskRepository(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := taskpkg.NewService(repo, nil)
+	upload, err := service.CreateTask("/local/source", "bucket", "backup", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	download, err := service.CreateDownloadTask("/local/restore", "bucket", "backup", true, []taskpkg.Item{
+		{RelativePath: "a.txt", Size: 12, Status: taskpkg.ItemStatusSuccess},
+		{RelativePath: "b.txt", Size: 8, Status: taskpkg.ItemStatusDownloading},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, _, err := executeCommand(NewRootCmd(), "task", "list", "--config", configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{upload.ID, download.ID, "direction=upload", "direction=download", "items=1/2", "running=1", "bytes=12/20", "source=s3://bucket/backup/", "destination=/local/restore", "source=/local/source", "destination=s3://bucket/backup/"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("missing %q in %s", want, stdout)
+		}
+	}
+	stdout, _, err = executeCommand(NewRootCmd(), "task", "status", download.ID, "--config", configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"direction: download", "source: s3://bucket/backup/", "destination: /local/restore", "items_downloading: 1"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("missing %q in %s", want, stdout)
+		}
+	}
+}
+
+func TestTaskListEmptyExplainsDatabaseAndConfig(t *testing.T) {
+	configPath, _, dbPath := writeTestConfig(t)
+	stdout, _, err := executeCommand(NewRootCmd(), "task", "list", "--config", configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout, dbPath) || !strings.Contains(stdout, "same --config") {
+		t.Fatalf("missing empty database guidance: %s", stdout)
+	}
+}

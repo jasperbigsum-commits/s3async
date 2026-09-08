@@ -6,7 +6,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const version = "0.1.0"
+// version is overridden with -ldflags -X for tagged release builds.
+var version = "0.1.0"
 
 func newVersionCmd() *cobra.Command {
 	return &cobra.Command{

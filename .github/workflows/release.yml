@@ -1,0 +1,177 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+    steps:
+      - name: Validate semantic version tag
+        id: tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+
+          number = r'(?:0|[1-9][0-9]*)'
+          identifier = rf'(?:{number}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          pattern = rf'v{number}\.{number}\.{number}(?:-({identifier}(?:\.{identifier})*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?'
+          tag = os.environ['TAG']
+          match = re.fullmatch(pattern, tag)
+          if not match:
+              raise SystemExit(f'Invalid version tag: {tag}. Expected v1.2.3 or v1.2.3-rc.1')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'version={tag}\n')
+              output.write(f'prerelease={str(match.group(1) is not None).lower()}\n')
+          PY
+
+  build:
+    needs: validate
+    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            goos: darwin
+            goarch: arm64
+            binary: s3async
+          - runner: ubuntu-22.04
+            goos: linux
+            goarch: amd64
+            binary: s3async
+          - runner: windows-2022
+            goos: windows
+            goarch: amd64
+            binary: s3async.exe
+    env:
+      CGO_ENABLED: '1'
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      VERSION: ${{ needs.validate.outputs.version }}
+      BINARY: ${{ matrix.binary }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Windows C compiler
+        id: msys2
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc
+
+      - name: Add Windows C compiler to PATH
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          Join-Path $env:MSYS2_LOCATION 'ucrt64\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          'CC=gcc' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Test
+        run: go test -timeout 10m ./...
+
+      - name: Race detector (Linux)
+        if: runner.os == 'Linux'
+        run: go test -race -timeout 10m ./...
+
+      - name: Build executable
+        run: |
+          mkdir -p dist/package
+          flags="-s -w -X github.com/jasperbigsum-commits/s3async/cmd.version=$VERSION"
+          if [[ "$GOOS" == windows ]]; then
+            flags="$flags -extldflags=-static"
+          fi
+          go build -trimpath -ldflags "$flags" -o "dist/package/$BINARY" .
+          actual_version=$("./dist/package/$BINARY" version)
+          test "${actual_version//$'\r'/}" = "$VERSION"
+          cp README.md dist/package/
+          cp examples/config.yaml dist/package/config.example.yaml
+
+      - name: Package Unix executable
+        if: runner.os != 'Windows'
+        run: |
+          tar -czf "dist/s3async_${VERSION}_${GOOS}_${GOARCH}.tar.gz" -C dist/package .
+
+      - name: Package Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/package/* -DestinationPath "dist/s3async_${env:VERSION}_${env:GOOS}_${env:GOARCH}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [validate, build]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.validate.outputs.version }}
+      PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz *.zip > SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        shell: bash
+        run: |
+          # Keep assets private until every upload succeeds; a failed draft can be retried.
+          if gh release view "$VERSION" --json isDraft > release.json; then
+            if [[ $(jq -r .isDraft release.json) != true ]]; then
+              echo 'Release is already published. Create a new version tag instead.' >&2
+              exit 1
+            fi
+          else
+            args=(--draft --verify-tag --title "$VERSION" --generate-notes)
+            if [[ "$PRERELEASE" == true ]]; then
+              args+=(--prerelease)
+            fi
+            gh release create "$VERSION" "${args[@]}"
+          fi
+          gh release upload "$VERSION" dist/* --clobber
+          gh release edit "$VERSION" --draft=false --prerelease="$PRERELEASE"

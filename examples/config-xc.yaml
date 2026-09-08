@@ -1,0 +1,43 @@
+# AWS S3 example
+s3:
+  region: region
+  bucket: drd-bucket
+  prefix: ""
+  endpoint: http://172.31.206.2
+  static_credentials:
+    access_key_id: MAKIRQVFCILPDLNA29Q4
+    secret_access_key: RPQCP3wPyb3OAhlF4II4qeFh79KSU1jenHFnkLoF
+  # endpoint: (default AWS S3)
+  # force_path_style: false
+  # skip_tls_verify: false
+  # ca_cert_file: ""
+  # static_credentials:
+  #   access_key_id: ""
+  #   secret_access_key: ""
+
+# MinIO / rustfs compatible S3 endpoint example
+# s3:
+#   region: us-east-1
+#   bucket: local-bucket
+#   prefix: backups/
+#   endpoint: http://127.0.0.1:9000
+#   force_path_style: true
+#   skip_tls_verify: true  # Only for local development
+#   # ca_cert_file: "/path/to/ca.crt"
+#   static_credentials:
+#     access_key_id: minioadmin
+#     secret_access_key: minioadmin
+
+workers: 8
+database_path: ./.s3async/tasks.db
+retry:
+  max_attempts: 3
+  backoff_ms: 500
+filters:
+  include: []
+  exclude:
+    - "*.tmp"
+    - ".git/*"
+security:
+  redact_logs: true
+  dry_run: false

@@ -7,7 +7,9 @@ import (
 )
 
 func TestLoadUsesDefaultsWithoutConfig(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testHome := t.TempDir()
+	t.Setenv("HOME", testHome)
+	t.Setenv("USERPROFILE", testHome)
 	t.Setenv("S3ASYNC_PROFILE", "")
 	t.Setenv("S3ASYNC_REGION", "")
 	t.Setenv("S3ASYNC_BUCKET", "")
@@ -29,14 +31,16 @@ func TestLoadUsesDefaultsWithoutConfig(t *testing.T) {
 	if cfg.Workers != 4 {
 		t.Fatalf("Load() workers = %d, want 4", cfg.Workers)
 	}
-	wantDBPath := filepath.Join(os.Getenv("HOME"), ".s3async", "tasks.db")
+	wantDBPath := filepath.Join(testHome, ".s3async", "tasks.db")
 	if cfg.DatabasePath != wantDBPath {
 		t.Fatalf("Load() database path = %q, want %q", cfg.DatabasePath, wantDBPath)
 	}
 }
 
 func TestLoadReadsConfigFile(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testHome := t.TempDir()
+	t.Setenv("HOME", testHome)
+	t.Setenv("USERPROFILE", testHome)
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(configPath, []byte("bucket: from-file\nprefix: backups/\nsecurity:\n  dry_run: true\nworkers: 9\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -62,7 +66,9 @@ func TestLoadReadsConfigFile(t *testing.T) {
 }
 
 func TestLoadEnvOverridesConfigFile(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testHome := t.TempDir()
+	t.Setenv("HOME", testHome)
+	t.Setenv("USERPROFILE", testHome)
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(configPath, []byte("bucket: from-file\nworkers: 9\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -84,7 +90,9 @@ func TestLoadEnvOverridesConfigFile(t *testing.T) {
 }
 
 func TestLoadReturnsErrorForExplicitMissingConfig(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testHome := t.TempDir()
+	t.Setenv("HOME", testHome)
+	t.Setenv("USERPROFILE", testHome)
 
 	_, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
 	if err == nil {

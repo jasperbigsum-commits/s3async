@@ -44,6 +44,7 @@ func newSyncCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("create bootstrap: %w", err)
 			}
+			defer bootstrap.Close()
 
 			source := args[0]
 			resolvedBucket := bucket
@@ -162,6 +163,7 @@ func runTaskOnce(taskID string, configPath string) error {
 	if err != nil {
 		return err
 	}
+	defer bootstrap.Close()
 
 	return bootstrap.TaskService.ExecuteTask(taskID, uploaderClient, execCfg)
 }
@@ -175,6 +177,7 @@ func runWorkerLoop(cmd *cobra.Command, configPath string, once bool, pollInterva
 	if err != nil {
 		return err
 	}
+	defer bootstrap.Close()
 
 	startedAt := time.Now()
 	lastWorkAt := startedAt
@@ -212,6 +215,7 @@ func buildExecutionDeps(configPath string) (*app.Bootstrap, *uploader.Client, ta
 
 	uploaderClient, err := uploader.New(context.Background(), bootstrap.Config)
 	if err != nil {
+		_ = bootstrap.Close()
 		return nil, nil, task.ExecutionConfig{}, fmt.Errorf("create uploader client: %w", err)
 	}
 
@@ -228,6 +232,7 @@ func spawnDaemon(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("create bootstrap: %w", err)
 	}
+	defer bootstrap.Close()
 
 	manager := internaldaemon.NewManager(bootstrap.Config.StateDir)
 	running, pid, err := manager.IsRunning()

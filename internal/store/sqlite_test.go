@@ -162,5 +162,10 @@ func newTestSQLiteRepo(t *testing.T) (*SQLiteTaskRepository, string) {
 	if err != nil {
 		t.Fatalf("NewSQLiteTaskRepository() error = %v", err)
 	}
+	t.Cleanup(func() {
+		if err := repo.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	})
 	return repo, dbPath
 }

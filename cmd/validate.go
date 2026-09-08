@@ -19,6 +19,7 @@ func newValidateCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("create bootstrap: %w", err)
 			}
+			defer bootstrap.Close()
 
 			cfg := bootstrap.Config
 			fmt.Fprintf(cmd.OutOrStdout(), "database_path: %s\n", cfg.DatabasePath)

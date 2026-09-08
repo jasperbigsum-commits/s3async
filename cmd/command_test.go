@@ -61,6 +61,11 @@ func TestTaskStatusRespectsFailedLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSQLiteTaskRepository() error = %v", err)
 	}
+	t.Cleanup(func() {
+		if err := repo.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	})
 
 	now := time.Now().UTC().Truncate(time.Second)
 	started := now.Add(time.Second)
@@ -341,6 +346,11 @@ func TestReverseSyncPersistsDirectionAndRetries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := repo.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	})
 	tasks, err := repo.List()
 	if err != nil || len(tasks) != 1 {
 		t.Fatalf("tasks=%v error=%v", tasks, err)
@@ -361,6 +371,11 @@ func TestReverseSyncPersistsDirectionAndRetries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := bootstrap.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	})
 	if err := bootstrap.TaskService.RetryTask(record.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -385,6 +400,11 @@ func TestTaskListShowsBothDirectionsFromConfiguredDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := repo.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	})
 	service := taskpkg.NewService(repo, nil)
 	upload, err := service.CreateTask("/local/source", "bucket", "backup", false, nil)
 	if err != nil {
@@ -425,5 +445,52 @@ func TestTaskListEmptyExplainsDatabaseAndConfig(t *testing.T) {
 	}
 	if !strings.Contains(stdout, dbPath) || !strings.Contains(stdout, "same --config") {
 		t.Fatalf("missing empty database guidance: %s", stdout)
+	}
+}
+
+func TestCommandsCloseBootstrapOnSuccessAndError(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		args      []string
+		wantError bool
+	}{
+		{"list", []string{"task", "list"}, false},
+		{"worker", []string{"task", "worker", "--once"}, false},
+		{"status_missing", []string{"task", "status", "missing"}, true},
+		{"retry_missing", []string{"task", "retry", "missing"}, true},
+		{"run_missing", []string{"task", "run", "missing"}, true},
+		{"daemon_stop", []string{"daemon", "stop"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath, _, _ := writeTestConfig(t)
+			original := newBootstrapWithConfig
+			var opened []*app.Bootstrap
+			newBootstrapWithConfig = func(path string) (*app.Bootstrap, error) {
+				bootstrap, err := app.NewBootstrapWithConfig(path)
+				if err == nil {
+					opened = append(opened, bootstrap)
+				}
+				return bootstrap, err
+			}
+			t.Cleanup(func() {
+				newBootstrapWithConfig = original
+				for _, bootstrap := range opened {
+					_ = bootstrap.Close()
+				}
+			})
+			args := append(tc.args, "--config", configPath)
+			_, _, err := executeCommand(NewRootCmd(), args...)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("command error = %v, wantError = %v", err, tc.wantError)
+			}
+			if len(opened) == 0 {
+				t.Fatal("command did not open a bootstrap")
+			}
+			for _, bootstrap := range opened {
+				if _, err := bootstrap.TaskService.ListTasks(); err == nil {
+					t.Error("command left its database open")
+				}
+			}
+		})
 	}
 }

@@ -30,6 +30,7 @@ func newDaemonRunCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("create bootstrap: %w", err)
 			}
+			defer bootstrap.Close()
 
 			manager := internaldaemon.NewManager(bootstrap.Config.StateDir)
 			pid, release, err := manager.Acquire()
@@ -49,6 +50,7 @@ func newDaemonRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer bootstrap.Close()
 
 			startedAt := time.Now().UTC()
 			status := internaldaemon.Status{
@@ -144,6 +146,7 @@ func newDaemonStatusCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("create bootstrap: %w", err)
 			}
+			defer bootstrap.Close()
 			manager := internaldaemon.NewManager(bootstrap.Config.StateDir)
 
 			running, pid, err := manager.IsRunning()
@@ -187,6 +190,7 @@ func newDaemonStopCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("create bootstrap: %w", err)
 			}
+			defer bootstrap.Close()
 			manager := internaldaemon.NewManager(bootstrap.Config.StateDir)
 			if err := manager.RequestStop(); err != nil {
 				return fmt.Errorf("request daemon stop: %w", err)

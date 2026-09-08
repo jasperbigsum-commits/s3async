@@ -34,6 +34,7 @@ func newTaskListCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("create bootstrap: %w", err)
 			}
+			defer bootstrap.Close()
 
 			tasks, err := bootstrap.TaskService.ListTasks()
 			if err != nil {
@@ -88,6 +89,7 @@ func newTaskStatusCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("create bootstrap: %w", err)
 			}
+			defer bootstrap.Close()
 
 			t, err := bootstrap.TaskService.GetTask(args[0])
 			if err != nil {
@@ -171,6 +173,7 @@ func newTaskRetryCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("create bootstrap: %w", err)
 			}
+			defer bootstrap.Close()
 
 			if err := bootstrap.TaskService.RetryTask(args[0]); err != nil {
 				return fmt.Errorf("retry task: %w", err)
@@ -250,6 +253,7 @@ func newTaskEventsCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("create bootstrap: %w", err)
 			}
+			defer bootstrap.Close()
 
 			events, err := internallogging.ReadAuditEvents(bootstrap.Config.StateDir+"/task-events.jsonl", limit)
 			if err != nil {

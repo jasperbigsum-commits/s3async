@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -80,7 +81,7 @@ func TestManagerAcquireRejectsExistingLivePID(t *testing.T) {
 	if err := manager.EnsureStateDir(); err != nil {
 		t.Fatalf("EnsureStateDir() error = %v", err)
 	}
-	if err := os.WriteFile(manager.PIDFile(), []byte("1\n"), 0o644); err != nil {
+	if err := os.WriteFile(manager.PIDFile(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 

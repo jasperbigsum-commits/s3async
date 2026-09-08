@@ -28,10 +28,16 @@ func NewSQLiteTaskRepository(path string) (*SQLiteTaskRepository, error) {
 
 	repo := &SQLiteTaskRepository{db: db}
 	if err := repo.migrate(); err != nil {
+		_ = db.Close()
 		return nil, fmt.Errorf("migrate sqlite database: %w", err)
 	}
 
 	return repo, nil
+}
+
+// Close releases the database connections owned by this repository.
+func (r *SQLiteTaskRepository) Close() error {
+	return r.db.Close()
 }
 
 func (r *SQLiteTaskRepository) migrate() error {

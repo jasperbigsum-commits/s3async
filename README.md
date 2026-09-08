@@ -145,7 +145,7 @@ go build ./...
 
 ## GitHub 自动发布
 
-推送符合语义化版本规范的 `v` 前缀 tag 后，`.github/workflows/release.yml` 自动测试、构建并发布 GitHub Release。普通分支推送和 PR 不发布版本；以 `v` 开头但格式非法的 tag 会被校验拒绝。
+推送符合语义化版本规范的 `v` 前缀 tag 后，`.github/workflows/release.yml` 自动测试、构建并发布 GitHub Release。所有分支推送（包括 `main/master`）和 PR 仅运行测试检查，不打包、不上传可执行程序、不发布版本；以 `v` 开头但格式非法的 tag 会被校验拒绝。
 
 ```bash
 # 先将代码及流水线提交并推送到 GitHub，再创建版本 tag

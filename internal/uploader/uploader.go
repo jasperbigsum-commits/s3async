@@ -7,19 +7,74 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	cfgpkg "github.com/jasperbigsum-commits/s3async/internal/config"
+	"github.com/jasperbigsum-commits/s3async/internal/task"
 )
 
 type Client struct {
 	s3      *s3.Client
 	dryRun  bool
 	timeout time.Duration
+}
+
+// PlanIncrementalUpload compares local files with objects under prefix. Files whose
+// size and modification time match the remote object are marked as skipped.
+func (c *Client) PlanIncrementalUpload(ctx context.Context, bucket, prefix string, items []task.Item) ([]task.Item, error) {
+	if c.s3 == nil || bucket == "" {
+		return nil, fmt.Errorf("S3 client and bucket are required to plan incremental upload")
+	}
+	prefix = strings.Trim(strings.ReplaceAll(prefix, "\\", "/"), "/")
+	if prefix != "" {
+		prefix += "/"
+	}
+	remote := make(map[string]types.Object)
+	pager := s3.NewListObjectsV2Paginator(c.s3, &s3.ListObjectsV2Input{Bucket: &bucket, Prefix: &prefix})
+	for pager.HasMorePages() {
+		pageCtx, cancel := context.WithTimeout(ctx, c.timeout)
+		page, err := pager.NextPage(pageCtx)
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("list objects: %w", err)
+		}
+		for _, object := range page.Contents {
+			key := aws.ToString(object.Key)
+			if strings.HasPrefix(key, prefix) {
+				remote[strings.TrimPrefix(key, prefix)] = object
+			}
+		}
+	}
+
+	for i := range items {
+		relativePath := filepath.ToSlash(items[i].RelativePath)
+		object, ok := remote[relativePath]
+		if !ok || object.Size == nil || object.LastModified == nil || *object.Size != items[i].Size {
+			continue
+		}
+		matches := items[i].ModTime.UTC().Truncate(time.Second).Equal(object.LastModified.UTC().Truncate(time.Second))
+		if headCtx, cancel := context.WithTimeout(ctx, c.timeout); true {
+			head, err := c.s3.HeadObject(headCtx, &s3.HeadObjectInput{Bucket: &bucket, Key: aws.String(prefix + relativePath)})
+			cancel()
+			if err == nil {
+				if stored, parseErr := strconv.ParseInt(head.Metadata["s3async-modtime-ns"], 10, 64); parseErr == nil {
+					matches = stored == items[i].ModTime.UTC().UnixNano()
+				}
+			}
+		}
+		if matches {
+			items[i].Status = task.ItemStatusSkipped
+		}
+	}
+	return items, nil
 }
 
 // clientOptions holds the resolved options for building the S3 client
@@ -141,12 +196,18 @@ func (c *Client) UploadFile(bucket string, key string, localPath string) error {
 		return fmt.Errorf("open local file %s: %w", localPath, err)
 	}
 	defer file.Close()
-
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat local file %s: %w", localPath, err)
+	}
 	_, err = c.s3.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: &bucket,
 		Key:    &key,
 		Body:   file,
 		ACL:    types.ObjectCannedACLPrivate,
+		Metadata: map[string]string{
+			"s3async-modtime-ns": strconv.FormatInt(info.ModTime().UTC().UnixNano(), 10),
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("put object %s: %w", key, err)

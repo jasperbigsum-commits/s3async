@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 type Entry struct {
 	Path         string
 	RelativePath string
 	Size         int64
+	ModTime      time.Time
 }
 
 func Scan(root string) ([]Entry, error) {
@@ -32,7 +34,7 @@ func Scan(root string) ([]Entry, error) {
 			return fmt.Errorf("build relative path for %s: %w", path, err)
 		}
 
-		entries = append(entries, Entry{Path: path, RelativePath: relativePath, Size: info.Size()})
+		entries = append(entries, Entry{Path: path, RelativePath: relativePath, Size: info.Size(), ModTime: info.ModTime()})
 		return nil
 	})
 	if err != nil {

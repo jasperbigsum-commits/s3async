@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/jasperbigsum-commits/s3async/internal/task"
 )
 
 func testClient(t *testing.T, handler http.HandlerFunc) *Client {
@@ -48,6 +49,33 @@ func TestPlanDownloadPaginationAndFilter(t *testing.T) {
 	}
 	if calls != 2 || len(items) != 1 || items[0].RelativePath != "sub/a.txt" || items[0].Path != filepath.Join(root, "sub", "a.txt") || items[0].Size != 3 {
 		t.Fatalf("calls=%d items=%+v", calls, items)
+	}
+}
+
+func TestPlanIncrementalDownloadSkipsUnchangedFiles(t *testing.T) {
+	modTime := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprintf(w, `<ListBucketResult><Contents><Key>backup/unchanged.txt</Key><Size>3</Size><LastModified>%s</LastModified></Contents><Contents><Key>backup/changed.txt</Key><Size>4</Size><LastModified>%s</LastModified></Contents></ListBucketResult>`, modTime.Format(time.RFC3339), modTime.Format(time.RFC3339))
+	})
+	root := t.TempDir()
+	unchanged := filepath.Join(root, "unchanged.txt")
+	changed := filepath.Join(root, "changed.txt")
+	if err := os.WriteFile(unchanged, []byte("old"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(changed, []byte("old"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(unchanged, modTime, modTime); err != nil {
+		t.Fatal(err)
+	}
+	items, err := client.PlanIncrementalDownload(context.Background(), "bucket", "backup", root, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].Status != task.ItemStatusSkipped || items[1].Status != task.ItemStatusPending {
+		t.Fatalf("items=%+v", items)
 	}
 }
 

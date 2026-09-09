@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -57,6 +58,16 @@ func LocalPath(root, relative string) (string, error) {
 }
 
 func (c *Client) PlanDownload(ctx context.Context, bucket, prefix, root string, include, exclude []string) ([]task.Item, error) {
+	return c.planDownload(ctx, bucket, prefix, root, include, exclude, false)
+}
+
+// PlanIncrementalDownload skips objects whose local file has the same size and
+// modification time as the S3 object.
+func (c *Client) PlanIncrementalDownload(ctx context.Context, bucket, prefix, root string, include, exclude []string) ([]task.Item, error) {
+	return c.planDownload(ctx, bucket, prefix, root, include, exclude, true)
+}
+
+func (c *Client) planDownload(ctx context.Context, bucket, prefix, root string, include, exclude []string, incremental bool) ([]task.Item, error) {
 	if c.s3 == nil || bucket == "" {
 		return nil, fmt.Errorf("S3 client and bucket are required to list objects")
 	}
@@ -89,7 +100,16 @@ func (c *Client) PlanDownload(ctx context.Context, bucket, prefix, root string, 
 			if err != nil {
 				return nil, err
 			}
-			items = append(items, task.Item{Path: local, RelativePath: relative, Size: aws.ToInt64(object.Size), Status: task.ItemStatusPending})
+			item := task.Item{Path: local, RelativePath: relative, Size: aws.ToInt64(object.Size), Status: task.ItemStatusPending}
+			if object.LastModified != nil {
+				item.ModTime = object.LastModified.UTC()
+			}
+			if incremental && object.LastModified != nil {
+				if info, statErr := os.Stat(local); statErr == nil && info.Mode().IsRegular() && info.Size() == item.Size && info.ModTime().UTC().Truncate(time.Second).Equal(object.LastModified.UTC().Truncate(time.Second)) {
+					item.Status = task.ItemStatusSkipped
+				}
+			}
+			items = append(items, item)
 		}
 	}
 	// Reject file/directory conflicts before starting any downloads.

@@ -31,6 +31,7 @@ func newSyncCmd() *cobra.Command {
 	var prefix string
 	var async bool
 	var download bool
+	var incremental bool
 	var configPath string
 	var include []string
 	var exclude []string
@@ -83,7 +84,11 @@ func newSyncCmd() *cobra.Command {
 				if clientErr != nil {
 					return fmt.Errorf("create S3 client: %w", clientErr)
 				}
-				items, err = client.PlanDownload(cmd.Context(), resolvedBucket, resolvedPrefix, source, resolvedInclude, resolvedExclude)
+				if incremental {
+					items, err = client.PlanIncrementalDownload(cmd.Context(), resolvedBucket, resolvedPrefix, source, resolvedInclude, resolvedExclude)
+				} else {
+					items, err = client.PlanDownload(cmd.Context(), resolvedBucket, resolvedPrefix, source, resolvedInclude, resolvedExclude)
+				}
 				if err != nil {
 					return fmt.Errorf("plan download: %w", err)
 				}
@@ -97,7 +102,20 @@ func newSyncCmd() *cobra.Command {
 					if !filter.Match(entry.RelativePath, resolvedInclude, resolvedExclude) {
 						continue
 					}
-					items = append(items, task.Item{Path: entry.Path, RelativePath: entry.RelativePath, Size: entry.Size, Status: task.ItemStatusPending})
+					items = append(items, task.Item{Path: entry.Path, RelativePath: entry.RelativePath, Size: entry.Size, ModTime: entry.ModTime, Status: task.ItemStatusPending})
+				}
+				if incremental {
+					cfg := bootstrap.Config
+					cfg.Bucket, cfg.S3.Bucket = resolvedBucket, resolvedBucket
+					cfg.Security.DryRun = false
+					client, clientErr := uploader.New(cmd.Context(), cfg)
+					if clientErr != nil {
+						return fmt.Errorf("create S3 client: %w", clientErr)
+					}
+					items, err = client.PlanIncrementalUpload(cmd.Context(), resolvedBucket, resolvedPrefix, items)
+					if err != nil {
+						return fmt.Errorf("plan incremental upload: %w", err)
+					}
 				}
 				createdTask, err = service.CreateTask(source, resolvedBucket, resolvedPrefix, async, items)
 			}
@@ -148,6 +166,7 @@ func newSyncCmd() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&download, "download", false, "Download S3 prefix into the local directory")
+	cmd.Flags().BoolVar(&incremental, "incremental", false, "Skip unchanged files during upload or download")
 	cmd.Flags().StringVar(&bucket, "bucket", "", "S3 bucket")
 	cmd.Flags().StringVar(&prefix, "prefix", "", "S3 directory prefix")
 	cmd.Flags().BoolVar(&async, "async", true, "Submit task in async mode")

@@ -1,63 +1,95 @@
 # s3async
 
+`s3async` 是一个面向 macOS、Windows 和 Linux 的安全、高效、跨平台 S3 异步同步命令行工具。
+它支持本地目录上传到 S3、从 S3 下载到本地、增量同步、任务队列、失败重试和后台守护进程。
+
 `s3async` is a secure, efficient, cross-platform asynchronous S3 sync CLI for macOS, Windows and Linux.
 
-## Current scope
-- Upload local files or download S3 prefixes into local directories
-- Async sync task creation
-- SQLite persistence for tasks and task items
-- Source directory scan with include/exclude filtering
-- Foreground execution and queue-aware background worker flow
-- File-level status, attempt, and timestamp updates during uploads
-- Retry-aware execution pipeline for queued tasks
-- Persistent task event logging for execution history and troubleshooting
-- Configuration loading via config file and environment variables
-- Validation command with actionable environment output
+## 功能概览 / Features
 
-## Commands
+- 本地文件上传到 S3，或将 S3 前缀下载到本地目录 / Upload and download
+- 增量上传：跳过目标端大小和修改时间均未变化的文件 / Incremental upload
+- 异步任务提交、SQLite 持久化、队列 worker 和后台 daemon / Async jobs and workers
+- include/exclude 文件过滤、文件级状态、失败重试和任务事件记录 / Filtering and retries
+- 配置文件、环境变量、AWS Profile、静态凭证和 S3 兼容端点 / Flexible configuration
+
+## 命令速查 / Commands
+
+命令默认使用配置文件中的数据库和 S3 设置。需要查询某个任务时，请使用创建任务时相同的 `--config` 参数。
+
+| 命令 | 说明 |
+| --- | --- |
+| `s3async sync <local-path>` | 上传本地目录到 S3 |
+| `s3async sync <local-path> --download` | 下载 S3 前缀到本地目录 |
+| `s3async sync <local-path> --incremental` | 增量同步，跳过未变化文件（上传和下载均支持） |
+| `s3async task list` | 列出任务及汇总状态 |
+| `s3async task status <task-id>` | 查看任务和文件级状态 |
+| `s3async task events` | 查看任务执行事件 |
+| `s3async task retry <task-id>` | 重置失败项并重新排队 |
+| `s3async task run <task-id>` | 前台执行指定任务 |
+| `s3async task worker` | 执行队列中的任务；可使用 `--once` 只执行一次 |
+| `s3async daemon run` | 启动后台任务守护进程 |
+| `s3async daemon status` | 查看守护进程状态 |
+| `s3async daemon stop` | 停止守护进程 |
+| `s3async validate` | 检查配置、数据库和凭证环境 |
+| `s3async version` | 输出版本号 |
+
+常用命令也可以直接复制使用：
 ```bash
-s3async sync <source>
+# 上传目录（异步提交，立即返回任务 ID）
+s3async sync ./data --bucket my-bucket --prefix backup/ --async
+
+# 上传目录并在当前终端等待完成
+s3async sync ./data --config examples/config.yaml --async=false
+
+# 增量上传：目标端未变化的文件会标记为 skipped
+s3async sync ./data --bucket my-bucket --prefix backup/ --incremental --async=false
+
+# 查看任务、事件和失败项
 s3async task list
-s3async task status <task-id>
-s3async task events
-s3async task retry <task-id>
-s3async task run <task-id>
-s3async task worker
-s3async daemon run
-s3async daemon status
-s3async daemon stop
-s3async validate
-s3async version
+s3async task status <task-id> --failed-limit 20
+s3async task events --task-id <task-id> --limit 100
 ```
 
-## Quick start
+增量规划需要列举 S3 对象，因此账号需要 `s3:ListBucket` 权限。源端删除的文件不会从 S3 删除。
+
+## 快速开始 / Quick start
 ```bash
+# 1. 前台上传
 go run . sync ./data --bucket my-bucket --prefix backup/ --async
+
+# 2. 使用配置文件前台执行
 go run . sync ./data --config examples/config.yaml --async=false
+
+# 3. 启动一次 worker，处理一个排队任务
 go run . task worker --once
+
+# 4. worker 持续轮询，空闲 30 秒后退出
 go run . task worker --poll-interval 2s --idle-timeout 30s
+
+# 5. 检查配置和运行环境
 go run . task status <task-id> --failed-limit 20
 go run . task events --task-id <task-id> --limit 100
 go run . daemon status
 go run . validate --config examples/config.yaml
 ```
 
-## 从 S3 反向同步到本地
+## 从 S3 下载到本地 / Download from S3
 
 ```bash
-# 前台下载：backup/reports/a.txt → ./restore/reports/a.txt
+# 前台下载：backup/reports/a.txt -> ./restore/reports/a.txt
 s3async sync ./restore --download --bucket my-bucket --prefix backup/ --async=false
 
-# 后台下载，复用任务队列、并发数和重试配置
+# 异步下载：复用任务队列、并发数和重试配置
 s3async sync ./restore --download --config examples/config.yaml --async
 
-# 只下载匹配文件；显式空前缀表示整个桶，覆盖配置中的 prefix
+# 只下载匹配文件；空前缀表示整个桶，并覆盖配置中的 prefix
 s3async sync ./restore --download --bucket my-bucket --prefix "" --include "*.txt" --exclude "private/*"
 ```
 
 `--download` 将本地路径解释为目标目录，自动创建所需子目录。`--bucket`、`--prefix`、配置文件和环境变量的解析方式与上传一致。前缀按目录处理（`backup` 与 `backup/` 等价），过滤规则作用于去掉前缀后的相对路径；跳过 S3 目录标记。
 
-每次任务会下载所有匹配对象并覆盖本地同名文件，不删除本地多余文件，也不按时间或校验和跳过文件。先写入同目录临时文件，完整接收后再替换目标文件；下载失败保留原文件并清理临时文件。保留 S3 返回的最后修改时间。拒绝路径穿越、目标路径中的符号链接、仅大小写不同的重名对象以及文件/目录冲突。
+默认每次任务会下载所有匹配对象并覆盖本地同名文件；使用 `--incremental` 时，大小和修改时间均未变化的文件会标记为 `skipped`。不删除本地多余文件，也不执行删除同步。下载先写入同目录临时文件，完整接收后再替换目标文件；失败时保留原文件并清理临时文件。保留 S3 返回的最后修改时间。拒绝路径穿越、目标路径中的符号链接、仅大小写不同的重名对象以及文件/目录冲突。
 
 查询任务时应使用创建任务时的同一份配置，否则可能查询到另一个数据库：
 
@@ -72,69 +104,75 @@ go run . task status <task-id> --config examples/config-xc.yaml
 
 `security.dry_run: true` 仍需连接 S3 列举对象，但不会创建或覆盖本地文件。下载需要 `s3:ListBucket` 和 `s3:GetObject` 权限。当前每次列举请求及单个文件下载超时为 30 秒；失败重试从文件开头重新下载，不支持断点续传。
 
-## Configuration
-See `examples/config.yaml`.
+## 配置 / Configuration
 
-### New S3 Configuration Structure (Recommended)
-The new `s3.*` configuration takes precedence over legacy top-level fields:
+完整示例见 `examples/config.yaml`。配置文件未指定时，程序会依次查找当前目录和 `~/.s3async/config.yaml`。
+
+### 推荐配置：`s3.*`
+
+新的 `s3.*` 配置优先于旧版顶层字段：
 
 ```yaml
 s3:
-  profile: default              # AWS profile name
-  region: ap-southeast-1         # S3 region
-  bucket: my-bucket             # S3 bucket name
-  prefix: backups/              # S3 prefix for uploads
-  endpoint: http://127.0.0.1:9000  # S3-compatible endpoint (MinIO, etc.)
-  force_path_style: true        # Use path-style addressing (required for MinIO)
-  skip_tls_verify: false        # Skip TLS verification (dev only!)
-  ca_cert_file: ""              # Custom CA certificate file for HTTPS
-  static_credentials:           # Static credentials (takes precedence over profile)
+  profile: default              # AWS Profile 名称
+  region: ap-southeast-1        # S3 区域
+  bucket: my-bucket              # S3 存储桶
+  prefix: backups/               # 上传使用的 S3 前缀
+  endpoint: http://127.0.0.1:9000 # S3 兼容端点（如 MinIO）
+  force_path_style: true         # 使用路径式访问（MinIO 通常需要）
+  skip_tls_verify: false         # 跳过 TLS 校验，仅建议开发环境使用
+  ca_cert_file: ""               # HTTPS 自定义 CA 证书文件
+  static_credentials:            # 静态凭证，优先于 Profile
     access_key_id: AKIAIOSFODNN7EXAMPLE
     secret_access_key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 ```
 
-### Legacy Fields (Backward Compatible)
-Top-level `profile`, `region`, `bucket`, `prefix` are still supported but deprecated.
+### 旧版字段（兼容）
 
-### Environment Variables
-- `S3ASYNC_S3_PROFILE`, `S3ASYNC_S3_REGION`, `S3ASYNC_S3_BUCKET`
-- Or legacy: `S3ASYNC_PROFILE`, `S3ASYNC_REGION`, `S3ASYNC_BUCKET`
+顶层 `profile`、`region`、`bucket`、`prefix` 仍可使用，但已不推荐新增配置继续采用。
 
-### MinIO Testing
+### 环境变量 / Environment variables
+- 推荐变量：`S3ASYNC_S3_PROFILE`、`S3ASYNC_S3_REGION`、`S3ASYNC_S3_BUCKET`
+- 兼容旧变量：`S3ASYNC_PROFILE`、`S3ASYNC_REGION`、`S3ASYNC_BUCKET`
+
+### MinIO 本地测试
 ```bash
-# Start MinIO locally
+# 启动本地 MinIO
 docker run -p 9000:9000 -p 9001:9001 --name minio -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin minio/minio server /data --console-address ":9001"
 
-# Run s3async with MinIO endpoint
+# 使用 MinIO 端点验证并执行同步
 go run . validate --config examples/config.yaml
 go run . sync ./data --config examples/config.yaml --async=false
 ```
 
-### Security Notes
-- **Never commit secrets** to version control
-- Use environment variables or IAM roles in production
-- `skip_tls_verify: true` is for local development only
-- Use `dry_run: true` to test configuration safely
+### 安全说明
 
-## Documentation
+- 不要将密钥提交到版本库。
+- 生产环境优先使用环境变量、AWS Profile 或 IAM Role。
+- `skip_tls_verify: true` 仅用于本地开发测试。
+- 使用 `dry_run: true` 安全检查扫描和规划逻辑。
+
+## 文档 / Documentation
 - `docs/design.md`
 - `docs/mvp-plan.md`
 - `docs/work-log.md`
 - `docs/change-log.md`
 
-## Operational visibility
-- Task execution events are appended to `<state_dir>/task-events.jsonl`.
-- Daemon lifecycle and queue supervisor events are appended to `<state_dir>/audit.jsonl`.
-- Use `s3async task events --task-id <task-id>` to inspect recent item transitions and terminal task outcomes.
-- Use `s3async daemon status` to inspect the current daemon PID, heartbeat, and state directory.
+## 运行状态与日志 / Operational visibility
 
-## Security
-- Do not persist AWS secrets in task storage.
-- Prefer environment variables, AWS profile, or IAM role.
-- Add least-privilege IAM policies for S3 access.
-- Dry-run mode can be used to verify scan, planning, and execution logic safely.
+- 任务执行事件写入 `<state_dir>/task-events.jsonl`。
+- daemon 生命周期和队列事件写入 `<state_dir>/audit.jsonl`。
+- 使用 `s3async task events --task-id <task-id>` 查看文件状态变化和任务结果。
+- 使用 `s3async daemon status` 查看 daemon PID、心跳和状态目录。
 
-## Development
+## 安全 / Security
+
+- 任务数据库不会保存 AWS 密钥。
+- 生产环境优先使用环境变量、AWS Profile 或 IAM Role。
+- 为 S3 配置最小权限策略；上传需要 `s3:PutObject`，增量规划需要 `s3:ListBucket`。
+- `dry_run` 可用于安全检查扫描、规划和任务逻辑。
+
+## 开发与验证 / Development
 ```bash
 go mod tidy
 go test ./...
@@ -240,13 +278,9 @@ chmod +x scripts/build-linux.sh
 
 本项目使用 `github.com/mattn/go-sqlite3`，该驱动依赖 CGO 与系统 C 编译器。如果要在 CI 中交叉编译，请确保安装并配置了对应的 mingw 工具链，或考虑替换为纯 Go 驱动（例如 `modernc.org/sqlite`）以避免 CGO。
 
-### 依赖说明
-
-本项目使用 `github.com/mattn/go-sqlite3`，该驱动依赖 CGO 与系统 C 编译器。如果要在 CI 中交叉编译，请确保安装并配置了对应的 mingw 工具链，或考虑替换为纯 Go 驱动（例如 `modernc.org/sqlite`）以避免 CGO。
 
 
-
-## Current TODOs
+## 后续计划 / TODOs
 - convert detached worker launch into a first-class long-running daemon/service install mode
 - multipart upload and resume
 - retry jitter and selective retry policies

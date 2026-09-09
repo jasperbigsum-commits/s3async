@@ -74,6 +74,7 @@ type Item struct {
 	Path         string
 	RelativePath string
 	Size         int64
+	ModTime      time.Time
 	Status       ItemStatus
 	Error        string
 	AttemptCount int

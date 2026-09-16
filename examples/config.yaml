@@ -4,6 +4,7 @@ s3:
   region: ap-southeast-1
   bucket: my-bucket
   prefix: backups/
+  request_timeout: 30s # 单次请求总超时；大文件可设为 30m 或 2h
   # endpoint: (default AWS S3)
   # force_path_style: false
   # skip_tls_verify: false

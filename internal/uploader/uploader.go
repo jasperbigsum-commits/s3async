@@ -158,8 +158,15 @@ func buildLoadOptions(ctx context.Context, opts clientOptions) ([]func(*awsconfi
 }
 
 func New(ctx context.Context, cfg cfgpkg.Config) (*Client, error) {
+	timeout := cfg.S3.RequestTimeout
+	if timeout < 0 {
+		return nil, fmt.Errorf("S3 request timeout must be positive")
+	}
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
 	if cfg.Security.DryRun {
-		return &Client{dryRun: true, timeout: 30 * time.Second}, nil
+		return &Client{dryRun: true, timeout: timeout}, nil
 	}
 
 	opts := buildClientOptions(cfg)
@@ -189,7 +196,7 @@ func New(ctx context.Context, cfg cfgpkg.Config) (*Client, error) {
 		})
 	}
 
-	return &Client{s3: s3.NewFromConfig(awsCfg, s3Opts...), dryRun: cfg.Security.DryRun, timeout: 30 * time.Second}, nil
+	return &Client{s3: s3.NewFromConfig(awsCfg, s3Opts...), dryRun: cfg.Security.DryRun, timeout: timeout}, nil
 }
 
 func (c *Client) UploadFile(bucket string, key string, localPath string) error {

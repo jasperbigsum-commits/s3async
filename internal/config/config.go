@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -24,6 +25,7 @@ type Config struct {
 }
 
 type S3Config struct {
+	RequestTimeout    time.Duration
 	Profile           string
 	Region            string
 	Bucket            string
@@ -72,6 +74,7 @@ func Load(configPath string) (Config, error) {
 	v.SetDefault("bucket", "")
 	v.SetDefault("prefix", "")
 	v.SetDefault("workers", 4)
+	v.SetDefault("s3.request_timeout", "30s")
 	v.SetDefault("database_path", filepath.Join(homeDir, ".s3async", "tasks.db"))
 	v.SetDefault("state_dir", filepath.Join(homeDir, ".s3async"))
 	v.SetDefault("retry.max_attempts", 3)
@@ -166,6 +169,16 @@ func resolveS3Config(v *viper.Viper, legacy Config) (S3Config, error) {
 			SecretAccessKey: v.GetString("s3.static_credentials.secret_access_key"),
 		},
 	}
+
+	timeoutText := v.GetString("s3.request_timeout")
+	if timeoutText == "" {
+		timeoutText = "30s"
+	}
+	timeout, err := time.ParseDuration(timeoutText)
+	if err != nil || timeout <= 0 {
+		return S3Config{}, fmt.Errorf("s3.request_timeout must be a positive duration with units (e.g. 30s, 30m, 2h)")
+	}
+	s3Cfg.RequestTimeout = timeout
 
 	// Apply defaults from legacy if not set in s3.*
 	if s3Cfg.Profile == "" {

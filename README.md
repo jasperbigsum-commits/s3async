@@ -116,7 +116,7 @@ go run . task status <task-id> --config examples/config-xc.yaml
 
 下载方向存储在任务中，`task run`、`task retry` 和后台 worker 会继续执行下载。`task status` 显示 `mode: download` 和 `items_downloading`。为兼容现有数据库，传输中的计数沿用数据库的 `uploading_items` / `uploading_bytes` 字段。
 
-`security.dry_run: true` 仍需连接 S3 列举对象，但不会创建或覆盖本地文件。下载需要 `s3:ListBucket` 和 `s3:GetObject` 权限。当前每次列举请求及单个文件下载超时为 30 秒；失败重试从文件开头重新下载，不支持断点续传。
+`security.dry_run: true` 仍需连接 S3 列举对象，但不会创建或覆盖本地文件。下载需要 `s3:ListBucket` 和 `s3:GetObject` 权限。每次列举请求及单个文件下载默认超时为 30 秒，可通过 `s3.request_timeout` 配置；失败重试从文件开头重新下载，不支持断点续传。
 
 ## 配置 / Configuration
 
@@ -322,3 +322,22 @@ s3async sync ./data --bucket my-bucket --prefix 'backup/./' --async=false
 支持连续斜杠表示的空目录段。例如 `backup//a.txt`、`backup///a.txt` 在 `--prefix backup/` 下均映射到本地 `a.txt`；S3 请求保留原始斜杠数量。key 开头的 `/` 也只在本地映射时移除，文件始终保存在指定目标目录内。
 
 本地不能创建名称为 `/` 的目录，因此下载会折叠这些目录段；如果多个对象映射到同一个本地路径，整个规划会报冲突而非覆盖。仅由斜杠组成或以斜杠结尾的目录标记仍跳过，不创建空目录。重新上传不会自动还原被折叠的斜杠。
+
+
+### 大文件传输超时
+
+通过配置文件设置 `s3.request_timeout`（默认 `30s`），支持 `30m`、`2h` 等带单位的正时长，不接受零、负数或无单位数字：
+
+```yaml
+s3:
+  request_timeout: 30m
+```
+
+也可以使用环境变量 `S3ASYNC_S3_REQUEST_TIMEOUT=30m`，环境变量优先于配置文件。超时适用于单次上传、下载（包括完整响应体读取）、对象元数据查询及每一页对象列举，包含该调用内部的 SDK 重试时间；不是整个任务的总时限，也不是空闲超时。文件级失败重试会重新获得这一时限，下载从文件开头重新开始。
+
+```bash
+# 使用配置中的超时进行大文件下载
+s3async sync ./restore --download --config examples/config.yaml --async=false
+```
+
+后台 worker/daemon 从运行时配置读取超时。修改后需等待旧 daemon 停止，再使用同一份配置启动 daemon；仅修改配置不会更新已经运行的客户端。

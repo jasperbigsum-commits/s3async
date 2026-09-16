@@ -22,6 +22,9 @@
 | `s3async sync <local-path>` | 上传本地目录到 S3 |
 | `s3async sync <local-path> --download` | 下载 S3 前缀到本地目录 |
 | `s3async sync <local-path> --incremental` | 增量同步，跳过未变化文件（上传和下载均支持） |
+| `s3async sync <local-path> --from <RFC3339>` | 只同步指定时间之后修改的文件 |
+| `s3async sync <local-path> --to <RFC3339>` | 只同步指定时间之前修改的文件 |
+| `s3async sync <local-path> --timezone <区域>` | 指定不带时区日期参数的解释时区，默认使用本地时区 |
 | `s3async task list` | 列出任务及汇总状态 |
 | `s3async task status <task-id>` | 查看任务和文件级状态 |
 | `s3async task events` | 查看任务执行事件 |
@@ -45,6 +48,9 @@ s3async sync ./data --config examples/config.yaml --async=false
 # 增量上传：目标端未变化的文件会标记为 skipped
 s3async sync ./data --bucket my-bucket --prefix backup/ --incremental --async=false
 
+# 按修改时间范围同步（时间格式为 RFC3339）
+s3async sync ./data --from 2026-01-01T00:00:00Z --to 2026-01-31T23:59:59Z
+
 # 查看任务、事件和失败项
 s3async task list
 s3async task status <task-id> --failed-limit 20
@@ -52,6 +58,10 @@ s3async task events --task-id <task-id> --limit 100
 ```
 
 增量规划需要列举 S3 对象，因此账号需要 `s3:ListBucket` 权限。源端删除的文件不会从 S3 删除。
+
+`--from` 和 `--to` 可单独或同时使用。`--timezone` 默认读取运行机器的本地时区，也可以指定 IANA 时区名称，例如 `Asia/Shanghai`、`America/New_York` 或 `UTC`。日期参数可以写完整 RFC3339（如 `2026-01-01T00:00:00+08:00`），也可以写不带时区的 `YYYY-MM-DD` 或 `YYYY-MM-DD HH:MM:SS`，后者按 `--timezone` 解释。日期格式的 `--to 2026-01-31` 会包含当天结束时间。
+
+带显式时区的 RFC3339 值优先使用自身时区；`Z` 表示 UTC，`+08:00` 表示北京时间（UTC+8）。程序按绝对时间点比较，不按字符串或时区名称比较。
 
 ## 快速开始 / Quick start
 ```bash

@@ -2,9 +2,12 @@ package uploader
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -61,13 +64,22 @@ func (c *Client) PlanIncrementalUpload(ctx context.Context, bucket, prefix strin
 			continue
 		}
 		matches := items[i].ModTime.UTC().Truncate(time.Second).Equal(object.LastModified.UTC().Truncate(time.Second))
-		if headCtx, cancel := context.WithTimeout(ctx, c.timeout); true {
-			head, err := c.s3.HeadObject(headCtx, &s3.HeadObjectInput{Bucket: &bucket, Key: aws.String(prefix + relativePath)})
-			cancel()
-			if err == nil {
-				if stored, parseErr := strconv.ParseInt(head.Metadata["s3async-modtime-ns"], 10, 64); parseErr == nil {
-					matches = stored == items[i].ModTime.UTC().UnixNano()
+		headCtx, cancel := context.WithTimeout(ctx, c.timeout)
+		head, headErr := c.s3.HeadObject(headCtx, &s3.HeadObjectInput{Bucket: &bucket, Key: aws.String(prefix + relativePath)})
+		cancel()
+		if headErr == nil {
+			if head.ChecksumSHA256 != nil {
+				if file, openErr := os.Open(items[i].Path); openErr == nil {
+					h := sha256.New()
+					_, copyErr := io.Copy(h, file)
+					_ = file.Close()
+					if copyErr == nil {
+						matches = base64.StdEncoding.EncodeToString(h.Sum(nil)) == *head.ChecksumSHA256
+					}
 				}
+			}
+			if stored, parseErr := strconv.ParseInt(head.Metadata["s3async-modtime-ns"], 10, 64); parseErr == nil {
+				matches = stored == items[i].ModTime.UTC().UnixNano()
 			}
 		}
 		if matches {

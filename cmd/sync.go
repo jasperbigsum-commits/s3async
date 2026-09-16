@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/jasperbigsum-commits/s3async/internal/app"
@@ -32,6 +33,8 @@ func newSyncCmd() *cobra.Command {
 	var async bool
 	var download bool
 	var incremental bool
+	var fromDate, toDate string
+	var timezone string
 	var configPath string
 	var include []string
 	var exclude []string
@@ -41,6 +44,51 @@ func newSyncCmd() *cobra.Command {
 		Short: "Sync local files to S3, or download S3 files with --download",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			var from, to time.Time
+			var err error
+			loc := time.Local
+			if strings.TrimSpace(timezone) != "" && !strings.EqualFold(timezone, "local") {
+				loc, err = time.LoadLocation(timezone)
+				if err != nil {
+					return fmt.Errorf("invalid --timezone %q: %w", timezone, err)
+				}
+			}
+			parseBoundary := func(value string, endOfDay bool) (time.Time, error) {
+				value = strings.TrimSpace(value)
+				if value == "" {
+					return time.Time{}, nil
+				}
+				if parsed, parseErr := time.Parse(time.RFC3339, value); parseErr == nil {
+					return parsed, nil
+				}
+				layout := "2006-01-02 15:04:05"
+				if len(value) == len("2006-01-02") {
+					layout = "2006-01-02"
+				}
+				parsed, parseErr := time.ParseInLocation(layout, value, loc)
+				if parseErr != nil {
+					return time.Time{}, parseErr
+				}
+				if endOfDay && layout == "2006-01-02" {
+					parsed = parsed.Add(24*time.Hour - time.Nanosecond)
+				}
+				return parsed, nil
+			}
+			if strings.TrimSpace(fromDate) != "" {
+				from, err = parseBoundary(fromDate, false)
+				if err != nil {
+					return fmt.Errorf("invalid --from date: %w", err)
+				}
+			}
+			if strings.TrimSpace(toDate) != "" {
+				to, err = parseBoundary(toDate, true)
+				if err != nil {
+					return fmt.Errorf("invalid --to date: %w", err)
+				}
+			}
+			if !from.IsZero() && !to.IsZero() && from.After(to) {
+				return fmt.Errorf("--from must not be after --to")
+			}
 			bootstrap, err := newBootstrapWithConfig(configPath)
 			if err != nil {
 				return fmt.Errorf("create bootstrap: %w", err)
@@ -92,6 +140,16 @@ func newSyncCmd() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("plan download: %w", err)
 				}
+				if !from.IsZero() || !to.IsZero() {
+					filtered := items[:0]
+					for _, item := range items {
+						if (!from.IsZero() && item.ModTime.Before(from)) || (!to.IsZero() && item.ModTime.After(to)) {
+							continue
+						}
+						filtered = append(filtered, item)
+					}
+					items = filtered
+				}
 				createdTask, err = service.CreateDownloadTask(source, resolvedBucket, resolvedPrefix, async, items)
 			} else {
 				entries, scanErr := scanner.Scan(source)
@@ -100,6 +158,9 @@ func newSyncCmd() *cobra.Command {
 				}
 				for _, entry := range entries {
 					if !filter.Match(entry.RelativePath, resolvedInclude, resolvedExclude) {
+						continue
+					}
+					if (!from.IsZero() && entry.ModTime.Before(from)) || (!to.IsZero() && entry.ModTime.After(to)) {
 						continue
 					}
 					items = append(items, task.Item{Path: entry.Path, RelativePath: entry.RelativePath, Size: entry.Size, ModTime: entry.ModTime, Status: task.ItemStatusPending})
@@ -116,6 +177,16 @@ func newSyncCmd() *cobra.Command {
 					if err != nil {
 						return fmt.Errorf("plan incremental upload: %w", err)
 					}
+				}
+				if !from.IsZero() || !to.IsZero() {
+					filtered := items[:0]
+					for _, item := range items {
+						if (!from.IsZero() && item.ModTime.Before(from)) || (!to.IsZero() && item.ModTime.After(to)) {
+							continue
+						}
+						filtered = append(filtered, item)
+					}
+					items = filtered
 				}
 				createdTask, err = service.CreateTask(source, resolvedBucket, resolvedPrefix, async, items)
 			}
@@ -167,6 +238,9 @@ func newSyncCmd() *cobra.Command {
 
 	cmd.Flags().BoolVar(&download, "download", false, "Download S3 prefix into the local directory")
 	cmd.Flags().BoolVar(&incremental, "incremental", false, "Skip unchanged files during upload or download")
+	cmd.Flags().StringVar(&fromDate, "from", "", "Only sync files modified at or after RFC3339 time (timezone required)")
+	cmd.Flags().StringVar(&toDate, "to", "", "Only sync files modified at or before RFC3339 time (timezone required)")
+	cmd.Flags().StringVar(&timezone, "timezone", "Local", "Timezone for date-only --from/--to values (default: local timezone)")
 	cmd.Flags().StringVar(&bucket, "bucket", "", "S3 bucket")
 	cmd.Flags().StringVar(&prefix, "prefix", "", "S3 directory prefix")
 	cmd.Flags().BoolVar(&async, "async", true, "Submit task in async mode")

@@ -1,6 +1,7 @@
 package task
 
 import (
+	"crypto/rand"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -71,8 +72,12 @@ func (s *Service) createTask(source, bucket, prefix, mode string, async bool, it
 	}
 
 	now := time.Now().UTC()
+	id, err := newTaskID(now)
+	if err != nil {
+		return Task{}, err
+	}
 	t := Task{
-		ID:        fmt.Sprintf("task_%d", now.UnixNano()),
+		ID:        id,
 		Source:    source,
 		Bucket:    bucket,
 		Prefix:    prefix,
@@ -98,6 +103,16 @@ func (s *Service) createTask(source, bucket, prefix, mode string, async bool, it
 
 	s.emitEvent("task_created", t, Item{}, items, ExecutionConfig{}, "task persisted", "")
 	return t, nil
+}
+
+// Wall-clock resolution varies by platform; time alone is not a unique ID.
+// Randomness also distinguishes tasks created simultaneously in other processes.
+func newTaskID(now time.Time) (string, error) {
+	var entropy [16]byte
+	if _, err := rand.Read(entropy[:]); err != nil {
+		return "", fmt.Errorf("generate task ID: %w", err)
+	}
+	return fmt.Sprintf("task_%d_%x", now.UnixNano(), entropy), nil
 }
 
 func (s *Service) ListTasks() ([]Task, error) {

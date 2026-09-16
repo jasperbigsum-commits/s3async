@@ -347,6 +347,13 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 				}
 
 				key := joinObjectKey(normalizedPrefix, item.RelativePath)
+				if t.Mode == "download" {
+					// RelativePath is the exact suffix returned by S3, including leading slashes.
+					key = item.RelativePath
+					if normalizedPrefix != "" {
+						key = normalizedPrefix + "/" + item.RelativePath
+					}
+				}
 				var transferErr error
 				for attempt := 1; attempt <= cfg.MaxAttempts; attempt++ {
 					if err := s.repo.UpdateItemStatus(t.ID, item.RelativePath, activeStatus, ""); err != nil {

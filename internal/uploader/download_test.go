@@ -118,7 +118,7 @@ func TestDownloadReplacementAndFailureCleanup(t *testing.T) {
 
 func TestLocalPathRejectsUnsafeKeysAndSymlinks(t *testing.T) {
 	root := t.TempDir()
-	for _, key := range []string{"../escape", "a/../../escape", "/absolute", "a//b", "a/./b", "a\\b", "C:foo", "NUL.txt", "a.", "a/"} {
+	for _, key := range []string{"../escape", "a/../../escape", "a\\b", "C:foo", "NUL.txt", "a.", "a/"} {
 		if _, err := LocalPath(root, key); err == nil {
 			t.Errorf("accepted %q", key)
 		}
@@ -159,5 +159,79 @@ func TestPlanRejectsCaseCollisions(t *testing.T) {
 	_, err := client.PlanDownload(context.Background(), "bucket", "", t.TempDir(), nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "collision") {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestLocalPathDotSegments(t *testing.T) {
+	root := t.TempDir()
+	for _, key := range []string{"./a.txt", "sub/./a.txt", "./sub/./a.txt"} {
+		got, err := LocalPath(root, key)
+		if err != nil || got != filepath.Join(root, filepath.FromSlash(key)) {
+			t.Fatalf("%q: %q %v", key, got, err)
+		}
+	}
+	for _, key := range []string{".", "./.", "./../escape", "sub/./../../escape"} {
+		if _, err := LocalPath(root, key); err == nil {
+			t.Fatalf("accepted %q", key)
+		}
+	}
+}
+
+func TestPlanRejectsDotAliasCollision(t *testing.T) {
+	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<ListBucketResult><Contents><Key>a.txt</Key><Size>1</Size></Contents><Contents><Key>./a.txt</Key><Size>1</Size></Contents></ListBucketResult>`)
+	})
+	if _, err := client.PlanDownload(context.Background(), "bucket", "", t.TempDir(), nil, nil); err == nil {
+		t.Fatal("accepted alias collision")
+	}
+}
+
+func TestDownloadPreservesDotKey(t *testing.T) {
+	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/bucket/backup/sub/./a.txt" {
+			t.Errorf("changed key: %s", r.URL.Path)
+		}
+		fmt.Fprint(w, "data")
+	})
+	root := t.TempDir()
+	if err := client.DownloadFile("bucket", "backup/sub/./a.txt", root, "sub/./a.txt"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "sub", "a.txt"))
+	if err != nil || string(data) != "data" {
+		t.Fatalf("%q %v", data, err)
+	}
+}
+
+func TestSlashFolderDownload(t *testing.T) {
+	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("list-type") != "" {
+			fmt.Fprint(w, `<ListBucketResult><Contents><Key>backup//a.txt</Key><Size>4</Size></Contents></ListBucketResult>`)
+			return
+		}
+		if r.URL.Path != "/bucket/backup//a.txt" {
+			t.Errorf("key changed: %q", r.URL.Path)
+		}
+		fmt.Fprint(w, "data")
+	})
+	root := t.TempDir()
+	items, err := client.PlanDownload(context.Background(), "bucket", "backup/", root, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].RelativePath != "/a.txt" || items[0].Path != filepath.Join(root, "a.txt") {
+		t.Fatalf("%+v", items)
+	}
+	if err := client.DownloadFile("bucket", "backup/"+items[0].RelativePath, root, items[0].RelativePath); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSlashFolderCollision(t *testing.T) {
+	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<ListBucketResult><Contents><Key>a/b.txt</Key></Contents><Contents><Key>a//b.txt</Key></Contents></ListBucketResult>`)
+	})
+	if _, err := client.PlanDownload(context.Background(), "bucket", "", t.TempDir(), nil, nil); err == nil {
+		t.Fatal("accepted collision")
 	}
 }

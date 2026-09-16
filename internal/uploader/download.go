@@ -21,11 +21,21 @@ func LocalPath(root, relative string) (string, error) {
 	if !filepath.IsAbs(root) {
 		return "", fmt.Errorf("destination must be absolute")
 	}
-	if relative == "" || strings.ContainsAny(relative, "\\\x00:") {
+	if relative == "" || strings.HasSuffix(relative, "/") || strings.ContainsAny(relative, "\\\x00:") {
 		return "", fmt.Errorf("unsafe object path %q", relative)
 	}
 	current := root
-	parts := strings.Split(relative, "/")
+	rawParts := strings.Split(relative, "/")
+	parts := make([]string, 0, len(rawParts))
+	for _, part := range rawParts {
+		if part == "." || part == "" {
+			continue
+		}
+		parts = append(parts, part)
+	}
+	if len(parts) == 0 {
+		return "", fmt.Errorf("object path has no filename: %q", relative)
+	}
 	for i, part := range append([]string{""}, parts...) {
 		if i > 0 {
 			if part == "" || part == "." || part == ".." || strings.TrimRight(part, " .") != part {
@@ -116,14 +126,14 @@ func (c *Client) planDownload(ctx context.Context, bucket, prefix, root string, 
 	paths := make(map[string]bool, len(items))
 	for _, item := range items {
 		// Use a portable comparison so a plan is safe on case-insensitive filesystems.
-		name := strings.ToLower(item.RelativePath)
+		name := strings.ToLower(filepath.Clean(item.Path))
 		if paths[name] {
 			return nil, fmt.Errorf("object path collision: %q", item.RelativePath)
 		}
 		paths[name] = true
 	}
 	for _, item := range items {
-		for parent := filepath.ToSlash(filepath.Dir(item.RelativePath)); parent != "."; parent = filepath.ToSlash(filepath.Dir(parent)) {
+		for parent := filepath.Dir(item.Path); parent != root && parent != filepath.Dir(parent); parent = filepath.Dir(parent) {
 			if paths[strings.ToLower(parent)] {
 				return nil, fmt.Errorf("object file/directory conflict: %q", parent)
 			}

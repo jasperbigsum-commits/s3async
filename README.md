@@ -295,3 +295,26 @@ chmod +x scripts/build-linux.sh
 - multipart upload and resume
 - retry jitter and selective retry policies
 - richer CLI integration tests for daemon/task observability flows
+
+### 特殊 S3 路径：`./` 目录段
+
+支持对象 key 中的 `./`，例如 `backup/./reports/a.txt`。使用 `--prefix backup/` 下载时，本地保存为 `reports/a.txt`，S3 请求与任务记录仍保留原始 key。增量下载也使用该本地映射。以 `/` 结尾的目录标记仍会跳过。
+
+```bash
+# 下载包含 ./ 目录段的对象
+s3async sync ./restore --download --bucket my-bucket --prefix backup/ --incremental --async=false
+
+# 上传至含 ./ 的 S3 前缀（保留前缀原样）
+s3async sync ./data --bucket my-bucket --prefix 'backup/./' --async=false
+```
+
+本地文件系统无法保留独立的 `.` 目录名称，因此下载后重新上传不会自动还原 key 中的 `./`；需要通过 `--prefix` 指定相应前缀。过滤规则仍匹配去掉前缀后的原始相对 key。
+
+若 `a.txt` 与 `./a.txt` 同时存在，或规范化后出现文件/目录冲突，规划会报错，避免互相覆盖。`../` 和目标路径中的符号链接仍不允许。S3 key 开头的 `/` 仅作为对象名处理，不会写入本地绝对路径。
+
+
+### 名称显示为 `/` 的 S3 文件夹
+
+支持连续斜杠表示的空目录段。例如 `backup//a.txt`、`backup///a.txt` 在 `--prefix backup/` 下均映射到本地 `a.txt`；S3 请求保留原始斜杠数量。key 开头的 `/` 也只在本地映射时移除，文件始终保存在指定目标目录内。
+
+本地不能创建名称为 `/` 的目录，因此下载会折叠这些目录段；如果多个对象映射到同一个本地路径，整个规划会报冲突而非覆盖。仅由斜杠组成或以斜杠结尾的目录标记仍跳过，不创建空目录。重新上传不会自动还原被折叠的斜杠。

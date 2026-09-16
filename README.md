@@ -110,6 +110,10 @@ go run . task status <task-id> --config examples/config-xc.yaml
 
 `task list` 显示 `direction=upload/download`、来源、目标、文件数与已成功传输/跳过文件的字节数；空列表会提示当前数据库路径。字节数按文件完成后累计，并非实时网络传输速率。
 
+任务执行过程中如果 worker 被中断，重新执行 `s3async task retry <task-id>` 会同时回收 `failed`、`uploading` 和 `downloading` 项，并将它们恢复为 `pending` 后重新排队。SQLite 使用 WAL、写入串行化和 10 秒锁等待，减少多个 worker/CLI 进程同时更新任务时出现 `database is locked` 的概率。
+
+同一个任务不应被多个执行入口同时运行。`task worker` 和 `task run` 都会先原子认领任务；已经被其他进程执行的任务会被拒绝，避免重复上传、重复下载和状态互相覆盖。daemon 状态文件采用原子替换写入，`daemon status` 不会读到半截 JSON。
+
 下载方向存储在任务中，`task run`、`task retry` 和后台 worker 会继续执行下载。`task status` 显示 `mode: download` 和 `items_downloading`。为兼容现有数据库，传输中的计数沿用数据库的 `uploading_items` / `uploading_bytes` 字段。
 
 `security.dry_run: true` 仍需连接 S3 列举对象，但不会创建或覆盖本地文件。下载需要 `s3:ListBucket` 和 `s3:GetObject` 权限。当前每次列举请求及单个文件下载超时为 30 秒；失败重试从文件开头重新下载，不支持断点续传。

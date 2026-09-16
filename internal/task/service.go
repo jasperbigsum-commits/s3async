@@ -20,6 +20,10 @@ type Repository interface {
 	ClaimNextQueued() (Task, bool, error)
 }
 
+type taskClaimer interface {
+	ClaimTask(id string) (Task, bool, error)
+}
+
 type Uploader interface {
 	UploadFile(bucket string, key string, localPath string) error
 }
@@ -172,6 +176,16 @@ func (s *Service) RetryTask(id string) error {
 }
 
 func (s *Service) ExecuteTask(id string, uploader Uploader, cfg ExecutionConfig) error {
+	if claimer, ok := s.repo.(taskClaimer); ok {
+		claimed, claimedOK, claimErr := claimer.ClaimTask(id)
+		if claimErr != nil {
+			return fmt.Errorf("claim task from repo: %w", claimErr)
+		}
+		if !claimedOK {
+			return fmt.Errorf("task %s is already running or unavailable", id)
+		}
+		return s.executeLoadedTask(claimed, uploader, cfg, true)
+	}
 	t, err := s.repo.Get(id)
 	if err != nil {
 		return fmt.Errorf("get task from repo: %w", err)

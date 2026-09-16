@@ -25,6 +25,15 @@ func NewSQLiteTaskRepository(path string) (*SQLiteTaskRepository, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
+	// SQLite permits concurrent readers, but this repository performs frequent
+	// progress writes. A single pooled connection prevents in-process writer
+	// contention; WAL and busy_timeout allow other processes to read/retry safely.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if _, err := db.Exec(`PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("configure sqlite locking: %w", err)
+	}
 
 	repo := &SQLiteTaskRepository{db: db}
 	if err := repo.migrate(); err != nil {
@@ -487,11 +496,13 @@ func (r *SQLiteTaskRepository) ResetItemsForRetry(taskID string) error {
 	_, err := r.db.Exec(
 		`UPDATE task_items
 		 SET status = ?, error_message = '', attempt_count = 0, updated_at = ?, started_at = NULL, completed_at = NULL
-		 WHERE task_id = ? AND status = ?`,
+		 WHERE task_id = ? AND status IN (?, ?, ?)`,
 		string(task.ItemStatusPending),
 		time.Now().UTC().Format(time.RFC3339Nano),
 		taskID,
 		string(task.ItemStatusFailed),
+		string(task.ItemStatusUploading),
+		string(task.ItemStatusDownloading),
 	)
 	if err != nil {
 		return fmt.Errorf("reset task item status rows: %w", err)
@@ -553,6 +564,42 @@ func (r *SQLiteTaskRepository) ClaimNextQueued() (task.Task, bool, error) {
 	}
 
 	return claimedTask, true, nil
+}
+
+// ClaimTask atomically changes a task into running state. It prevents a direct
+// task run from racing with the daemon or another CLI process.
+func (r *SQLiteTaskRepository) ClaimTask(id string) (task.Task, bool, error) {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return task.Task{}, false, fmt.Errorf("begin task claim transaction: %w", err)
+	}
+	defer tx.Rollback()
+	row := tx.QueryRow(`SELECT id, source, bucket, prefix_value, mode, status, total_items, pending_items, uploading_items, success_items, failed_items, skipped_items, total_bytes, pending_bytes, uploading_bytes, success_bytes, failed_bytes, skipped_bytes, last_error, created_at, updated_at, started_at, completed_at FROM tasks WHERE id = ? AND status IN (?, ?, ?)`, id, string(task.StatusPending), string(task.StatusQueued), string(task.StatusFailed))
+	claimed, err := scanTask(row.Scan)
+	if err == sql.ErrNoRows {
+		return task.Task{}, false, nil
+	}
+	if err != nil {
+		return task.Task{}, false, fmt.Errorf("scan task to claim: %w", err)
+	}
+	now := time.Now().UTC()
+	claimed.Status = task.StatusRunning
+	claimed.UpdatedAt = now
+	if claimed.StartedAt == nil {
+		claimed.StartedAt = &now
+	}
+	claimed.CompletedAt = nil
+	result, err := tx.Exec(`UPDATE tasks SET status = ?, updated_at = ?, started_at = COALESCE(started_at, ?), completed_at = NULL WHERE id = ? AND status IN (?, ?, ?)`, string(task.StatusRunning), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), id, string(task.StatusPending), string(task.StatusQueued), string(task.StatusFailed))
+	if err != nil {
+		return task.Task{}, false, fmt.Errorf("mark task running: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return task.Task{}, false, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return task.Task{}, false, fmt.Errorf("commit task claim: %w", err)
+	}
+	return claimed, true, nil
 }
 
 type scanFn func(dest ...any) error

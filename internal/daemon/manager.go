@@ -25,21 +25,21 @@ type Manager struct {
 }
 
 type Status struct {
-	PID             int       `json:"pid"`
-	State           string    `json:"state"`
-	StartedAt       time.Time `json:"started_at,omitempty"`
-	HeartbeatAt     time.Time `json:"heartbeat_at,omitempty"`
-	StoppedAt       time.Time `json:"stopped_at,omitempty"`
-	PollInterval    string    `json:"poll_interval,omitempty"`
-	CurrentTaskID   string    `json:"current_task_id,omitempty"`
-	LastTaskID      string    `json:"last_task_id,omitempty"`
-	LastTaskStatus  string    `json:"last_task_status,omitempty"`
-	LastError       string    `json:"last_error,omitempty"`
-	TasksExecuted   int       `json:"tasks_executed,omitempty"`
-	QueuePolls      int       `json:"queue_polls,omitempty"`
-	IdleTimeout     string    `json:"idle_timeout,omitempty"`
-	AuditLogPath    string    `json:"audit_log_path,omitempty"`
-	StateDir        string    `json:"state_dir,omitempty"`
+	PID            int       `json:"pid"`
+	State          string    `json:"state"`
+	StartedAt      time.Time `json:"started_at,omitempty"`
+	HeartbeatAt    time.Time `json:"heartbeat_at,omitempty"`
+	StoppedAt      time.Time `json:"stopped_at,omitempty"`
+	PollInterval   string    `json:"poll_interval,omitempty"`
+	CurrentTaskID  string    `json:"current_task_id,omitempty"`
+	LastTaskID     string    `json:"last_task_id,omitempty"`
+	LastTaskStatus string    `json:"last_task_status,omitempty"`
+	LastError      string    `json:"last_error,omitempty"`
+	TasksExecuted  int       `json:"tasks_executed,omitempty"`
+	QueuePolls     int       `json:"queue_polls,omitempty"`
+	IdleTimeout    string    `json:"idle_timeout,omitempty"`
+	AuditLogPath   string    `json:"audit_log_path,omitempty"`
+	StateDir       string    `json:"state_dir,omitempty"`
 }
 
 func NewManager(stateDir string) *Manager {
@@ -157,7 +157,28 @@ func (m *Manager) WriteStatus(status Status) error {
 	if err != nil {
 		return fmt.Errorf("marshal daemon status: %w", err)
 	}
-	if err := os.WriteFile(m.StatusFile(), append(data, '\n'), 0o644); err != nil {
+	tmp, err := os.CreateTemp(m.stateDir, ".daemon-status-*")
+	if err != nil {
+		return fmt.Errorf("create temporary daemon status: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("set temporary daemon status permissions: %w", err)
+	}
+	if _, err := tmp.Write(append(data, '\n')); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temporary daemon status: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync temporary daemon status: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temporary daemon status: %w", err)
+	}
+	if err := os.Rename(tmpName, m.StatusFile()); err != nil {
 		return fmt.Errorf("write daemon status: %w", err)
 	}
 	return nil

@@ -37,6 +37,9 @@ type ExecutionConfig struct {
 	Workers     int
 	MaxAttempts int
 	Backoff     time.Duration
+	// PathStyle must match the style used when the task was planned: faithful
+	// trees decode local names back to true S3 keys on upload.
+	PathStyle PathStyle
 }
 
 type Service struct {
@@ -376,6 +379,9 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 				}
 
 				key := joinObjectKey(normalizedPrefix, item.RelativePath)
+				if cfg.PathStyle == PathFaithful {
+					key = joinObjectKey(normalizedPrefix, DecodeLocalRelative(item.RelativePath))
+				}
 				if t.Mode == "download" {
 					// RelativePath is the exact suffix returned by S3, including leading slashes.
 					key = item.RelativePath

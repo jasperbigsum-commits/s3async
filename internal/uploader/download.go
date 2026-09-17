@@ -18,6 +18,14 @@ import (
 // LocalPath rejects keys that cannot be mapped unambiguously to local files.
 // Existing symlinks below the destination are never followed.
 func LocalPath(root, relative string) (string, error) {
+	return LocalPathWithStyle(root, relative, task.PathCollapse)
+}
+
+// LocalPathWithStyle maps one S3 relative key under root. In faithful mode
+// empty and dot-only segments are escaped reversibly (see task.EncodeKeySegment)
+// instead of being dropped, so distinct keys never share a local file; every
+// other safety rule (traversal, symlinks, reserved names) still applies.
+func LocalPathWithStyle(root, relative string, style task.PathStyle) (string, error) {
 	if !filepath.IsAbs(root) {
 		return "", fmt.Errorf("destination must be absolute")
 	}
@@ -28,6 +36,10 @@ func LocalPath(root, relative string) (string, error) {
 	rawParts := strings.Split(relative, "/")
 	parts := make([]string, 0, len(rawParts))
 	for _, part := range rawParts {
+		if style == task.PathFaithful {
+			parts = append(parts, task.EncodeKeySegment(part))
+			continue
+		}
 		if part == "." || part == "" {
 			continue
 		}
@@ -67,17 +79,50 @@ func LocalPath(root, relative string) (string, error) {
 	return current, nil
 }
 
-func (c *Client) PlanDownload(ctx context.Context, bucket, prefix, root string, include, exclude []string) ([]task.Item, error) {
-	return c.planDownload(ctx, bucket, prefix, root, include, exclude, false)
+func (c *Client) PlanDownload(ctx context.Context, bucket, prefix, root string, include, exclude []string, policy CollisionPolicy) ([]task.Item, error) {
+	return c.planDownload(ctx, bucket, prefix, root, include, exclude, false, policy)
 }
 
 // PlanIncrementalDownload skips objects whose local file has the same size and
 // modification time as the S3 object.
-func (c *Client) PlanIncrementalDownload(ctx context.Context, bucket, prefix, root string, include, exclude []string) ([]task.Item, error) {
-	return c.planDownload(ctx, bucket, prefix, root, include, exclude, true)
+func (c *Client) PlanIncrementalDownload(ctx context.Context, bucket, prefix, root string, include, exclude []string, policy CollisionPolicy) ([]task.Item, error) {
+	return c.planDownload(ctx, bucket, prefix, root, include, exclude, true, policy)
 }
 
-func (c *Client) planDownload(ctx context.Context, bucket, prefix, root string, include, exclude []string, incremental bool) ([]task.Item, error) {
+// CollisionPolicy controls how PlanDownload handles S3 objects that normalize
+// to the same local file (for example keys that differ only by redundant
+// slashes, dot segments, or letter case).
+type CollisionPolicy int
+
+const (
+	// CollisionFail aborts the whole plan on the first collision.
+	CollisionFail CollisionPolicy = iota
+	// CollisionSkip leaves every colliding object out of the download as a
+	// skipped item carrying the reason, so the rest of the plan proceeds.
+	// Skipped objects never overwrite each other or anything else.
+	CollisionSkip
+)
+
+// ParseCollisionPolicy parses the --on-collision flag value.
+func ParseCollisionPolicy(value string) (CollisionPolicy, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "fail":
+		return CollisionFail, nil
+	case "skip":
+		return CollisionSkip, nil
+	default:
+		return CollisionFail, fmt.Errorf("invalid collision policy %q: want fail or skip", value)
+	}
+}
+
+func (p CollisionPolicy) String() string {
+	if p == CollisionSkip {
+		return "skip"
+	}
+	return "fail"
+}
+
+func (c *Client) planDownload(ctx context.Context, bucket, prefix, root string, include, exclude []string, incremental bool, policy CollisionPolicy) ([]task.Item, error) {
 	if c.s3 == nil || bucket == "" {
 		return nil, fmt.Errorf("S3 client and bucket are required to list objects")
 	}
@@ -106,7 +151,7 @@ func (c *Client) planDownload(ctx context.Context, bucket, prefix, root string, 
 			if !filter.Match(relative, include, exclude) {
 				continue
 			}
-			local, err := LocalPath(root, relative)
+			local, err := LocalPathWithStyle(root, relative, c.pathStyle)
 			if err != nil {
 				return nil, err
 			}
@@ -123,30 +168,72 @@ func (c *Client) planDownload(ctx context.Context, bucket, prefix, root string, 
 		}
 	}
 	// Reject file/directory conflicts before starting any downloads.
-	paths := make(map[string]bool, len(items))
-	for _, item := range items {
-		// Use a portable comparison so a plan is safe on case-insensitive filesystems.
-		name := strings.ToLower(filepath.Clean(item.Path))
-		if paths[name] {
-			return nil, fmt.Errorf("object path collision: %q", item.RelativePath)
-		}
-		paths[name] = true
+	// Items that share a normalized local path are either fatal (fail policy)
+	// or recorded as skipped with the reason (skip policy) so the rest of the
+	// plan can proceed without any ambiguous overwrite.
+	type seenPath struct {
+		index    int
+		relative string
 	}
-	for _, item := range items {
-		for parent := filepath.Dir(item.Path); parent != root && parent != filepath.Dir(parent); parent = filepath.Dir(parent) {
-			if paths[strings.ToLower(parent)] {
-				return nil, fmt.Errorf("object file/directory conflict: %q", parent)
+	paths := make(map[string]seenPath, len(items))
+	for i := range items {
+		// Use a portable comparison so a plan is safe on case-insensitive filesystems.
+		name := strings.ToLower(filepath.Clean(items[i].Path))
+		first, ok := paths[name]
+		if !ok {
+			paths[name] = seenPath{index: i, relative: items[i].RelativePath}
+			continue
+		}
+		if policy == CollisionSkip {
+			markCollisionSkipped(items, prefix, first.index, items[i].RelativePath)
+			markCollisionSkipped(items, prefix, i, first.relative)
+			continue
+		}
+		return nil, fmt.Errorf("object path collision: S3 objects %q and %q both map to local file %q; exclude one of them with --exclude, or rerun with --on-collision skip to download everything else",
+			prefix+first.relative, prefix+items[i].RelativePath, items[i].Path)
+	}
+	for i := range items {
+		// Skipped objects are never downloaded, so only pending items can
+		// create real file/directory conflicts at download time. Per-item
+		// conflicts with files that already exist locally are already
+		// rejected by LocalPath above.
+		if policy == CollisionSkip && items[i].Status == task.ItemStatusSkipped {
+			continue
+		}
+		for parent := filepath.Dir(items[i].Path); parent != root && parent != filepath.Dir(parent); parent = filepath.Dir(parent) {
+			first, ok := paths[strings.ToLower(parent)]
+			if !ok {
+				continue
 			}
+			// Collision-skipped objects are never downloaded, so they cannot
+			// create directories at runtime. (Conflicts with files that
+			// already exist locally are already rejected per item by
+			// LocalPath above.)
+			if policy == CollisionSkip && items[first.index].Status == task.ItemStatusSkipped && items[first.index].Error != "" {
+				continue
+			}
+			return nil, fmt.Errorf("object file/directory conflict: S3 object %q needs parent directory %q, which collides with S3 object %q",
+				prefix+items[i].RelativePath, parent, prefix+first.relative)
 		}
 	}
 	return items, nil
+}
+
+// markCollisionSkipped records a path collision on items[index] without
+// touching an already-recorded reason (for example an incremental skip).
+func markCollisionSkipped(items []task.Item, prefix string, index int, otherRelative string) {
+	items[index].Status = task.ItemStatusSkipped
+	if items[index].Error != "" {
+		return
+	}
+	items[index].Error = fmt.Sprintf("object path collision with %q: both map to local file %q", prefix+otherRelative, items[index].Path)
 }
 
 func (c *Client) DownloadFile(bucket, key, root, relative string) error {
 	if bucket == "" || key == "" {
 		return fmt.Errorf("bucket and key are required")
 	}
-	local, err := LocalPath(root, relative)
+	local, err := LocalPathWithStyle(root, relative, c.pathStyle)
 	if err != nil {
 		return err
 	}
@@ -166,7 +253,7 @@ func (c *Client) DownloadFile(bucket, key, root, relative string) error {
 	if err := os.MkdirAll(filepath.Dir(local), 0755); err != nil {
 		return err
 	}
-	if _, err := LocalPath(root, relative); err != nil {
+	if _, err := LocalPathWithStyle(root, relative, c.pathStyle); err != nil {
 		return err
 	}
 	temp, err := os.CreateTemp(filepath.Dir(local), ".s3async-*")
@@ -193,7 +280,7 @@ func (c *Client) DownloadFile(bucket, key, root, relative string) error {
 			return err
 		}
 	}
-	if _, err := LocalPath(root, relative); err != nil {
+	if _, err := LocalPathWithStyle(root, relative, c.pathStyle); err != nil {
 		return err
 	}
 	if err := os.Rename(temp.Name(), local); err != nil {

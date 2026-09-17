@@ -27,6 +27,10 @@ s3:
 #     secret_access_key: minioadmin
 
 workers: 8
+# 本地路径映射风格：collapse（默认，丢弃空段/点段，碰到同名冲突按 --on-collision 处理）
+# 或 faithful（空段存为 %2F 目录、`.` 存为 %2E、`..` 存为 %2E%2E，上传自动解码还原；
+#  必须与执行端一致，请写进配置文件而不要只靠命令行）。
+# path_style: collapse
 database_path: ./.s3async/tasks.db
 retry:
   max_attempts: 3

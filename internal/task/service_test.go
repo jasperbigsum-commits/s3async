@@ -496,6 +496,55 @@ func TestJoinObjectKey(t *testing.T) {
 	}
 }
 
+func TestExecuteUploadDecodesFaithfulPaths(t *testing.T) {
+	newFaithfulTask := func(t *testing.T, service *Service) Task {
+		t.Helper()
+		createdTask, err := service.CreateTask("./data", "bucket", "backup", true, []Item{
+			{Path: "a/%2F/b.txt", RelativePath: "a/%2F/b.txt", Size: 1},
+			{Path: "%2E/c.txt", RelativePath: "%2E/c.txt", Size: 1},
+		})
+		if err != nil {
+			t.Fatalf("CreateTask() error = %v", err)
+		}
+		return createdTask
+	}
+
+	t.Run("faithful restores true keys", func(t *testing.T) {
+		repo := newMemoryRepo()
+		service := NewService(repo, nil)
+		createdTask := newFaithfulTask(t, service)
+		uploader := &fakeUploader{failures: map[string]int{}}
+		if err := service.ExecuteTask(createdTask.ID, uploader, ExecutionConfig{Workers: 1, MaxAttempts: 1, PathStyle: PathFaithful}); err != nil {
+			t.Fatalf("ExecuteTask() error = %v", err)
+		}
+		want := map[string]bool{"backup/a//b.txt": true, "backup/./c.txt": true}
+		if len(uploader.calls) != 2 {
+			t.Fatalf("upload calls = %v, want 2", uploader.calls)
+		}
+		for _, key := range uploader.calls {
+			if !want[key] {
+				t.Fatalf("upload key = %q, want one of backup/a//b.txt backup/./c.txt", key)
+			}
+		}
+	})
+
+	t.Run("collapse keeps literal names", func(t *testing.T) {
+		repo := newMemoryRepo()
+		service := NewService(repo, nil)
+		createdTask := newFaithfulTask(t, service)
+		uploader := &fakeUploader{failures: map[string]int{}}
+		if err := service.ExecuteTask(createdTask.ID, uploader, ExecutionConfig{Workers: 1, MaxAttempts: 1}); err != nil {
+			t.Fatalf("ExecuteTask() error = %v", err)
+		}
+		want := map[string]bool{"backup/a/%2F/b.txt": true, "backup/%2E/c.txt": true}
+		for _, key := range uploader.calls {
+			if !want[key] {
+				t.Fatalf("upload key = %q, want literal escaped names", key)
+			}
+		}
+	})
+}
+
 func TestExecuteTaskReturnsErrorWhenUpdateItemStatusFails(t *testing.T) {
 	repo := newMemoryRepo()
 	repo.failUpdateItemPath = "a.txt"

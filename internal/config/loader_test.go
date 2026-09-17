@@ -22,6 +22,7 @@ func TestLoadUsesDefaultsWithoutConfig(t *testing.T) {
 	t.Setenv("S3ASYNC_FILTERS_EXCLUDE", "")
 	t.Setenv("S3ASYNC_SECURITY_REDACT_LOGS", "")
 	t.Setenv("S3ASYNC_SECURITY_DRY_RUN", "")
+	t.Setenv("S3ASYNC_PATH_STYLE", "")
 
 	cfg, err := Load("")
 	if err != nil {
@@ -30,6 +31,9 @@ func TestLoadUsesDefaultsWithoutConfig(t *testing.T) {
 
 	if cfg.Workers != 4 {
 		t.Fatalf("Load() workers = %d, want 4", cfg.Workers)
+	}
+	if cfg.PathStyle != "collapse" {
+		t.Fatalf("Load() path style = %q, want collapse", cfg.PathStyle)
 	}
 	wantDBPath := filepath.Join(testHome, ".s3async", "tasks.db")
 	if cfg.DatabasePath != wantDBPath {
@@ -86,6 +90,42 @@ func TestLoadEnvOverridesConfigFile(t *testing.T) {
 	}
 	if cfg.Workers != 6 {
 		t.Fatalf("Load() workers = %d, want 6", cfg.Workers)
+	}
+}
+
+func TestLoadPathStyle(t *testing.T) {
+	testHome := t.TempDir()
+	t.Setenv("HOME", testHome)
+	t.Setenv("USERPROFILE", testHome)
+	t.Setenv("S3ASYNC_PATH_STYLE", "")
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("bucket: b\npath_style: faithful\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.PathStyle != "faithful" {
+		t.Fatalf("Load() path style = %q, want faithful", cfg.PathStyle)
+	}
+
+	t.Setenv("S3ASYNC_PATH_STYLE", "collapse")
+	cfg, err = Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.PathStyle != "collapse" {
+		t.Fatalf("Load() path style = %q, want env override collapse", cfg.PathStyle)
+	}
+
+	if err := os.WriteFile(configPath, []byte("bucket: b\npath_style: lossy\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	t.Setenv("S3ASYNC_PATH_STYLE", "")
+	if _, err := Load(configPath); err == nil {
+		t.Fatal("Load() accepted invalid path style")
 	}
 }
 

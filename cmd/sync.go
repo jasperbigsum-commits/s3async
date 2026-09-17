@@ -33,6 +33,7 @@ func newSyncCmd() *cobra.Command {
 	var async bool
 	var download bool
 	var incremental bool
+	var onCollision string
 	var fromDate, toDate string
 	var timezone string
 	var configPath string
@@ -115,6 +116,10 @@ func newSyncCmd() *cobra.Command {
 			if resolvedBucket == "" {
 				return fmt.Errorf("bucket is required via --bucket, config file, or S3ASYNC_BUCKET")
 			}
+			collisionPolicy, err := uploader.ParseCollisionPolicy(onCollision)
+			if err != nil {
+				return err
+			}
 
 			var items []task.Item
 			service := bootstrap.TaskService
@@ -133,12 +138,17 @@ func newSyncCmd() *cobra.Command {
 					return fmt.Errorf("create S3 client: %w", clientErr)
 				}
 				if incremental {
-					items, err = client.PlanIncrementalDownload(cmd.Context(), resolvedBucket, resolvedPrefix, source, resolvedInclude, resolvedExclude)
+					items, err = client.PlanIncrementalDownload(cmd.Context(), resolvedBucket, resolvedPrefix, source, resolvedInclude, resolvedExclude, collisionPolicy)
 				} else {
-					items, err = client.PlanDownload(cmd.Context(), resolvedBucket, resolvedPrefix, source, resolvedInclude, resolvedExclude)
+					items, err = client.PlanDownload(cmd.Context(), resolvedBucket, resolvedPrefix, source, resolvedInclude, resolvedExclude, collisionPolicy)
 				}
 				if err != nil {
 					return fmt.Errorf("plan download: %w", err)
+				}
+				for _, item := range items {
+					if item.Status == task.ItemStatusSkipped && item.Error != "" {
+						fmt.Fprintf(cmd.OutOrStdout(), "warning: skipped %s: %s\n", item.RelativePath, item.Error)
+					}
 				}
 				if !from.IsZero() || !to.IsZero() {
 					filtered := items[:0]
@@ -238,6 +248,7 @@ func newSyncCmd() *cobra.Command {
 
 	cmd.Flags().BoolVar(&download, "download", false, "Download S3 prefix into the local directory")
 	cmd.Flags().BoolVar(&incremental, "incremental", false, "Skip unchanged files during upload or download")
+	cmd.Flags().StringVar(&onCollision, "on-collision", "fail", "How to handle S3 objects that map to the same local file: fail or skip")
 	cmd.Flags().StringVar(&fromDate, "from", "", "Only sync files modified at or after RFC3339 time (timezone required)")
 	cmd.Flags().StringVar(&toDate, "to", "", "Only sync files modified at or before RFC3339 time (timezone required)")
 	cmd.Flags().StringVar(&timezone, "timezone", "Local", "Timezone for date-only --from/--to values (default: local timezone)")
@@ -317,6 +328,12 @@ func buildExecutionDeps(configPath string) (*app.Bootstrap, *uploader.Client, ta
 		MaxAttempts: bootstrap.Config.Retry.MaxAttempts,
 		Backoff:     time.Duration(bootstrap.Config.Retry.BackoffMS) * time.Millisecond,
 	}
+	pathStyle, err := task.ParsePathStyle(bootstrap.Config.PathStyle)
+	if err != nil {
+		_ = bootstrap.Close()
+		return nil, nil, task.ExecutionConfig{}, err
+	}
+	execCfg.PathStyle = pathStyle
 	return bootstrap, uploaderClient, execCfg, nil
 }
 

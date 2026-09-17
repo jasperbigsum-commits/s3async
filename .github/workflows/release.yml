@@ -126,6 +126,11 @@ jobs:
       VERSION: ${{ needs.validate.outputs.version }}
       PRERELEASE: ${{ needs.validate.outputs.prerelease }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
@@ -135,6 +140,15 @@ jobs:
       - name: Generate checksums
         working-directory: dist
         run: sha256sum *.tar.gz *.zip > SHA256SUMS.txt
+
+      - name: Generate release notes
+        run: |
+          python3 scripts/generate-release-notes.py \
+            --version "$VERSION" \
+            --dist dist \
+            --output RELEASE_NOTES.md \
+            --repo "$GH_REPO"
+          cat RELEASE_NOTES.md
 
       - name: Publish GitHub Release
         shell: bash
@@ -146,11 +160,11 @@ jobs:
               exit 1
             fi
           else
-            args=(--draft --verify-tag --title "$VERSION" --generate-notes)
+            args=(--draft --verify-tag --title "$VERSION" --notes-file RELEASE_NOTES.md)
             if [[ "$PRERELEASE" == true ]]; then
               args+=(--prerelease)
             fi
             gh release create "$VERSION" "${args[@]}"
           fi
           gh release upload "$VERSION" dist/* --clobber
-          gh release edit "$VERSION" --draft=false --prerelease="$PRERELEASE"
+          gh release edit "$VERSION" --draft=false --prerelease="$PRERELEASE" --notes-file RELEASE_NOTES.md

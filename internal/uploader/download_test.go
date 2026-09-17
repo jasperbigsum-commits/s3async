@@ -43,7 +43,7 @@ func TestPlanDownloadPaginationAndFilter(t *testing.T) {
 		}
 	})
 	root := t.TempDir()
-	items, err := client.PlanDownload(context.Background(), "bucket", "backup/", root, []string{"*.txt"}, []string{"skip.txt"})
+	items, err := client.PlanDownload(context.Background(), "bucket", "backup/", root, []string{"*.txt"}, []string{"skip.txt"}, CollisionFail)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestPlanIncrementalDownloadSkipsUnchangedFiles(t *testing.T) {
 	if err := os.Chtimes(unchanged, modTime, modTime); err != nil {
 		t.Fatal(err)
 	}
-	items, err := client.PlanIncrementalDownload(context.Background(), "bucket", "backup", root, nil, nil)
+	items, err := client.PlanIncrementalDownload(context.Background(), "bucket", "backup", root, nil, nil, CollisionFail)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestPlanRejectsConflictingObjects(t *testing.T) {
 	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `<ListBucketResult><Contents><Key>a</Key><Size>1</Size></Contents><Contents><Key>a/b</Key><Size>1</Size></Contents></ListBucketResult>`)
 	})
-	_, err := client.PlanDownload(context.Background(), "bucket", "", t.TempDir(), nil, nil)
+	_, err := client.PlanDownload(context.Background(), "bucket", "", t.TempDir(), nil, nil, CollisionFail)
 	if err == nil || !strings.Contains(err.Error(), "conflict") {
 		t.Fatalf("error=%v", err)
 	}
@@ -156,7 +156,7 @@ func TestPlanRejectsCaseCollisions(t *testing.T) {
 	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `<ListBucketResult><Contents><Key>A.txt</Key><Size>1</Size></Contents><Contents><Key>a.txt</Key><Size>1</Size></Contents></ListBucketResult>`)
 	})
-	_, err := client.PlanDownload(context.Background(), "bucket", "", t.TempDir(), nil, nil)
+	_, err := client.PlanDownload(context.Background(), "bucket", "", t.TempDir(), nil, nil, CollisionFail)
 	if err == nil || !strings.Contains(err.Error(), "collision") {
 		t.Fatalf("error=%v", err)
 	}
@@ -181,7 +181,7 @@ func TestPlanRejectsDotAliasCollision(t *testing.T) {
 	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `<ListBucketResult><Contents><Key>a.txt</Key><Size>1</Size></Contents><Contents><Key>./a.txt</Key><Size>1</Size></Contents></ListBucketResult>`)
 	})
-	if _, err := client.PlanDownload(context.Background(), "bucket", "", t.TempDir(), nil, nil); err == nil {
+	if _, err := client.PlanDownload(context.Background(), "bucket", "", t.TempDir(), nil, nil, CollisionFail); err == nil {
 		t.Fatal("accepted alias collision")
 	}
 }
@@ -215,7 +215,7 @@ func TestSlashFolderDownload(t *testing.T) {
 		fmt.Fprint(w, "data")
 	})
 	root := t.TempDir()
-	items, err := client.PlanDownload(context.Background(), "bucket", "backup/", root, nil, nil)
+	items, err := client.PlanDownload(context.Background(), "bucket", "backup/", root, nil, nil, CollisionFail)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,208 @@ func TestSlashFolderCollision(t *testing.T) {
 	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `<ListBucketResult><Contents><Key>a/b.txt</Key></Contents><Contents><Key>a//b.txt</Key></Contents></ListBucketResult>`)
 	})
-	if _, err := client.PlanDownload(context.Background(), "bucket", "", t.TempDir(), nil, nil); err == nil {
+	if _, err := client.PlanDownload(context.Background(), "bucket", "", t.TempDir(), nil, nil, CollisionFail); err == nil {
 		t.Fatal("accepted collision")
+	}
+}
+
+func TestPlanCollisionErrorNamesBothObjects(t *testing.T) {
+	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<ListBucketResult><Contents><Key>sub/a.txt</Key><Size>1</Size></Contents><Contents><Key>sub/./a.txt</Key><Size>2</Size></Contents></ListBucketResult>`)
+	})
+	_, err := client.PlanDownload(context.Background(), "bucket", "", t.TempDir(), nil, nil, CollisionFail)
+	if err == nil {
+		t.Fatal("accepted collision")
+	}
+	for _, want := range []string{"sub/a.txt", "sub/./a.txt", "local file", "--on-collision skip"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+func TestPlanCollisionSkipMarksBothSkipped(t *testing.T) {
+	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<ListBucketResult><Contents><Key>a.txt</Key><Size>1</Size></Contents><Contents><Key>./a.txt</Key><Size>2</Size></Contents><Contents><Key>b.txt</Key><Size>3</Size></Contents></ListBucketResult>`)
+	})
+	items, err := client.PlanDownload(context.Background(), "bucket", "", t.TempDir(), nil, nil, CollisionSkip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("items=%+v", items)
+	}
+	if items[0].Status != task.ItemStatusSkipped || items[0].Error == "" || !strings.Contains(items[0].Error, "./a.txt") {
+		t.Fatalf("first item not marked with collision: %+v", items[0])
+	}
+	if items[1].Status != task.ItemStatusSkipped || items[1].Error == "" || !strings.Contains(items[1].Error, "a.txt") {
+		t.Fatalf("second item not marked with collision: %+v", items[1])
+	}
+	if items[2].Status != task.ItemStatusPending || items[2].RelativePath != "b.txt" {
+		t.Fatalf("unrelated item affected: %+v", items[2])
+	}
+}
+
+func TestPlanCollisionSkipWithPrefix(t *testing.T) {
+	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<ListBucketResult><Contents><Key>backup/a.txt</Key><Size>1</Size></Contents><Contents><Key>backup//a.txt</Key><Size>1</Size></Contents></ListBucketResult>`)
+	})
+	items, err := client.PlanDownload(context.Background(), "bucket", "backup", t.TempDir(), nil, nil, CollisionSkip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].Status != task.ItemStatusSkipped || items[1].Status != task.ItemStatusSkipped {
+		t.Fatalf("items=%+v", items)
+	}
+	if !strings.Contains(items[0].Error, "backup//a.txt") || !strings.Contains(items[1].Error, "backup/a.txt") {
+		t.Fatalf("errors do not name full keys: %q %q", items[0].Error, items[1].Error)
+	}
+}
+
+func TestPlanCollisionSkipStillFailsFileDirConflict(t *testing.T) {
+	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<ListBucketResult><Contents><Key>a</Key><Size>1</Size></Contents><Contents><Key>a/b</Key><Size>1</Size></Contents></ListBucketResult>`)
+	})
+	_, err := client.PlanDownload(context.Background(), "bucket", "", t.TempDir(), nil, nil, CollisionSkip)
+	if err == nil || !strings.Contains(err.Error(), "conflict") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestPlanCollisionSkipSkippedPathIgnoresDirCheck(t *testing.T) {
+	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<ListBucketResult><Contents><Key>a</Key><Size>1</Size></Contents><Contents><Key>./a</Key><Size>1</Size></Contents><Contents><Key>a/b</Key><Size>1</Size></Contents></ListBucketResult>`)
+	})
+	items, err := client.PlanDownload(context.Background(), "bucket", "", t.TempDir(), nil, nil, CollisionSkip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("items=%+v", items)
+	}
+	if items[0].Status != task.ItemStatusSkipped || items[1].Status != task.ItemStatusSkipped {
+		t.Fatalf("colliding items not skipped: %+v", items)
+	}
+	if items[2].Status != task.ItemStatusPending || items[2].RelativePath != "a/b" {
+		t.Fatalf("pending item affected: %+v", items[2])
+	}
+}
+
+func TestParseCollisionPolicy(t *testing.T) {
+	for _, value := range []string{"fail", "FAIL", "", "  skip  ", "SKIP"} {
+		policy, err := ParseCollisionPolicy(value)
+		if err != nil {
+			t.Fatalf("%q: %v", value, err)
+		}
+		want := CollisionFail
+		if strings.Contains(strings.ToLower(value), "skip") {
+			want = CollisionSkip
+		}
+		if policy != want {
+			t.Fatalf("%q: policy=%v want %v", value, policy, want)
+		}
+	}
+	if _, err := ParseCollisionPolicy("overwrite"); err == nil {
+		t.Fatal("accepted invalid policy")
+	}
+}
+
+func faithfulClient(t *testing.T, handler http.HandlerFunc) *Client {
+	t.Helper()
+	client := testClient(t, handler)
+	client.pathStyle = task.PathFaithful
+	return client
+}
+
+func TestPlanFaithfulKeepsDoubleSlashKeysDistinct(t *testing.T) {
+	client := faithfulClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<ListBucketResult><Contents><Key>backup/a.txt</Key><Size>1</Size></Contents><Contents><Key>backup//a.txt</Key><Size>2</Size></Contents><Contents><Key>backup/./b.txt</Key><Size>3</Size></Contents></ListBucketResult>`)
+	})
+	root := t.TempDir()
+	items, err := client.PlanDownload(context.Background(), "bucket", "backup", root, nil, nil, CollisionFail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("items=%+v", items)
+	}
+	wantPaths := []string{
+		filepath.Join(root, "a.txt"),
+		filepath.Join(root, "%2F", "a.txt"),
+		filepath.Join(root, "%2E", "b.txt"),
+	}
+	for i, want := range wantPaths {
+		if items[i].Path != want {
+			t.Errorf("items[%d].Path = %q, want %q", i, items[i].Path, want)
+		}
+		if items[i].Status != task.ItemStatusPending {
+			t.Errorf("items[%d].Status = %s, want pending", i, items[i].Status)
+		}
+	}
+	if items[0].RelativePath != "a.txt" || items[1].RelativePath != "/a.txt" || items[2].RelativePath != "./b.txt" {
+		t.Fatalf("relative paths rewritten: %+v", items)
+	}
+}
+
+func TestFaithfulDownloadPreservesExactKey(t *testing.T) {
+	client := faithfulClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("list-type") != "" {
+			fmt.Fprint(w, `<ListBucketResult><Contents><Key>backup//a.txt</Key><Size>4</Size></Contents></ListBucketResult>`)
+			return
+		}
+		if r.URL.Path != "/bucket/backup//a.txt" {
+			t.Errorf("key changed: %q", r.URL.Path)
+		}
+		fmt.Fprint(w, "data")
+	})
+	root := t.TempDir()
+	items, err := client.PlanDownload(context.Background(), "bucket", "backup/", root, nil, nil, CollisionFail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Path != filepath.Join(root, "%2F", "a.txt") {
+		t.Fatalf("%+v", items)
+	}
+	if err := client.DownloadFile("bucket", "backup/"+items[0].RelativePath, root, items[0].RelativePath); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "%2F", "a.txt"))
+	if err != nil || string(data) != "data" {
+		t.Fatalf("%q %v", data, err)
+	}
+}
+
+func TestFaithfulDotDotStaysUnderRoot(t *testing.T) {
+	collapse := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<ListBucketResult><Contents><Key>backup/../escape.txt</Key><Size>1</Size></Contents></ListBucketResult>`)
+	})
+	if _, err := collapse.PlanDownload(context.Background(), "bucket", "backup", t.TempDir(), nil, nil, CollisionFail); err == nil {
+		t.Fatal("collapse accepted dotdot escape")
+	}
+	faithful := faithfulClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<ListBucketResult><Contents><Key>backup/../escape.txt</Key><Size>1</Size></Contents></ListBucketResult>`)
+	})
+	root := t.TempDir()
+	items, err := faithful.PlanDownload(context.Background(), "bucket", "backup", root, nil, nil, CollisionFail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Path != filepath.Join(root, "%2E%2E", "escape.txt") {
+		t.Fatalf("%+v", items)
+	}
+}
+
+func TestFaithfulSymlinkStillRejected(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Symlink(t.TempDir(), filepath.Join(root, "link")); err != nil {
+		t.Skip(err)
+	}
+	if _, err := LocalPathWithStyle(root, "link/file", task.PathFaithful); err == nil {
+		t.Fatal("faithful accepted symlink")
+	}
+	// Safety rules other than dot handling are untouched: absolute escape via
+	// backslash-style segments is still rejected.
+	if _, err := LocalPathWithStyle(root, `a\b`, task.PathFaithful); err == nil {
+		t.Fatal("faithful accepted backslash segment")
 	}
 }

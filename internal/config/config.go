@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jasperbigsum-commits/s3async/internal/task"
 	"github.com/spf13/viper"
 )
 
@@ -16,6 +17,7 @@ type Config struct {
 	Bucket       string
 	Prefix       string
 	Workers      int
+	PathStyle    string
 	DatabasePath string
 	StateDir     string
 	Retry        RetryConfig
@@ -74,6 +76,7 @@ func Load(configPath string) (Config, error) {
 	v.SetDefault("bucket", "")
 	v.SetDefault("prefix", "")
 	v.SetDefault("workers", 4)
+	v.SetDefault("path_style", "collapse")
 	v.SetDefault("s3.request_timeout", "30s")
 	v.SetDefault("database_path", filepath.Join(homeDir, ".s3async", "tasks.db"))
 	v.SetDefault("state_dir", filepath.Join(homeDir, ".s3async"))
@@ -107,6 +110,7 @@ func Load(configPath string) (Config, error) {
 		Bucket:       v.GetString("bucket"),
 		Prefix:       v.GetString("prefix"),
 		Workers:      v.GetInt("workers"),
+		PathStyle:    v.GetString("path_style"),
 		DatabasePath: v.GetString("database_path"),
 		StateDir:     v.GetString("state_dir"),
 		Retry: RetryConfig{
@@ -147,6 +151,13 @@ func Load(configPath string) (Config, error) {
 	if cfg.Workers <= 0 {
 		cfg.Workers = 4
 	}
+	// The path style must agree between planning and execution (including the
+	// daemon, which reloads this file), so it is validated up front.
+	style, err := task.ParsePathStyle(cfg.PathStyle)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.PathStyle = style.String()
 	if cfg.StateDir == "" {
 		cfg.StateDir = filepath.Dir(cfg.DatabasePath)
 	}

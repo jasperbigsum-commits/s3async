@@ -25,9 +25,10 @@ import (
 )
 
 type Client struct {
-	s3      *s3.Client
-	dryRun  bool
-	timeout time.Duration
+	s3        *s3.Client
+	dryRun    bool
+	timeout   time.Duration
+	pathStyle task.PathStyle
 }
 
 // PlanIncrementalUpload compares local files with objects under prefix. Files whose
@@ -59,13 +60,19 @@ func (c *Client) PlanIncrementalUpload(ctx context.Context, bucket, prefix strin
 
 	for i := range items {
 		relativePath := filepath.ToSlash(items[i].RelativePath)
-		object, ok := remote[relativePath]
+		remoteKey := relativePath
+		if c.pathStyle == task.PathFaithful {
+			// items[i].RelativePath is the faithful local form; compare and
+			// address by the true S3 suffix instead.
+			remoteKey = task.DecodeLocalRelative(relativePath)
+		}
+		object, ok := remote[remoteKey]
 		if !ok || object.Size == nil || object.LastModified == nil || *object.Size != items[i].Size {
 			continue
 		}
 		matches := items[i].ModTime.UTC().Truncate(time.Second).Equal(object.LastModified.UTC().Truncate(time.Second))
 		headCtx, cancel := context.WithTimeout(ctx, c.timeout)
-		head, headErr := c.s3.HeadObject(headCtx, &s3.HeadObjectInput{Bucket: &bucket, Key: aws.String(prefix + relativePath)})
+		head, headErr := c.s3.HeadObject(headCtx, &s3.HeadObjectInput{Bucket: &bucket, Key: aws.String(prefix + remoteKey)})
 		cancel()
 		if headErr == nil {
 			if head.ChecksumSHA256 != nil {
@@ -165,8 +172,12 @@ func New(ctx context.Context, cfg cfgpkg.Config) (*Client, error) {
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
+	pathStyle, err := task.ParsePathStyle(cfg.PathStyle)
+	if err != nil {
+		return nil, err
+	}
 	if cfg.Security.DryRun {
-		return &Client{dryRun: true, timeout: timeout}, nil
+		return &Client{dryRun: true, timeout: timeout, pathStyle: pathStyle}, nil
 	}
 
 	opts := buildClientOptions(cfg)
@@ -196,7 +207,7 @@ func New(ctx context.Context, cfg cfgpkg.Config) (*Client, error) {
 		})
 	}
 
-	return &Client{s3: s3.NewFromConfig(awsCfg, s3Opts...), dryRun: cfg.Security.DryRun, timeout: timeout}, nil
+	return &Client{s3: s3.NewFromConfig(awsCfg, s3Opts...), dryRun: cfg.Security.DryRun, timeout: timeout, pathStyle: pathStyle}, nil
 }
 
 func (c *Client) UploadFile(bucket string, key string, localPath string) error {

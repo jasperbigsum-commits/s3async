@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- `path_style: faithful` config: reversible `%2F`/`%2E`/`%2E%2E` escaping so S3 keys with empty or dot segments (e.g. `backup//a.txt`) restore to distinct local paths; uploads decode back to the true keys. `s3async validate` prints the active style.
+- `--on-collision skip` flag for `sync --download`: colliding objects become skipped items with reasons instead of aborting the whole plan; collision errors now name both full S3 keys plus the shared local file.
 - Config loader with file + env support.
 - Task item persistence in SQLite.
 - Source scanning with relative path capture.

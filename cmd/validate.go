@@ -71,6 +71,7 @@ func newValidateCmd() *cobra.Command {
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "workers: %d\n", cfg.Workers)
+			fmt.Fprintf(cmd.OutOrStdout(), "path_style: %s\n", cfg.PathStyle)
 			fmt.Fprintf(cmd.OutOrStdout(), "dry_run: %v\n", cfg.Security.DryRun)
 			return nil
 		},

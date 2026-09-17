@@ -39,18 +39,12 @@ DIST_DIR="dist"
 mkdir -p "$DIST_DIR"
 
 if [[ "$TARGET" == "linux" ]]; then
-  export CC=${CC:-gcc}
-  export CGO_ENABLED=1
+  export CGO_ENABLED=0
   export GOOS=linux
   export GOARCH=amd64
   EXE_OUTPUT="${DIST_DIR}/$OUT"
 else
-  if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
-    echo "Error: x86_64-w64-mingw32-gcc is required for Windows target cross-build"
-    exit 1
-  fi
-  export CC=x86_64-w64-mingw32-gcc
-  export CGO_ENABLED=1
+  export CGO_ENABLED=0
   export GOOS=windows
   export GOARCH=amd64
   EXE_OUTPUT="${DIST_DIR}/${OUT%.exe}.exe"

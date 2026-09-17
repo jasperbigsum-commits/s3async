@@ -222,7 +222,7 @@ git push origin v1.3.0-rc.1
 
 压缩包同时附带 README 和 `config.example.yaml`。解压后通过 `./s3async version`（Windows：`.\s3async.exe version`）检查版本，输出与 tag 一致。Linux 下可将三个压缩包与校验文件放在同一目录执行 `sha256sum -c SHA256SUMS.txt` 验证完整性。
 
-三个平台分别使用原生 runner 并启用 CGO，所有平台测试及 Linux race 检查通过后才发布。Linux 产物在 Ubuntu 22.04 上构建，面向 glibc 2.35+ 环境，不是适用于 Alpine/musl 的静态程序。macOS 产物未做 Apple 签名和公证。
+三个平台分别使用原生 runner 并禁用 CGO 做纯 Go 静态构建，所有平台测试及 Linux race 检查通过后才发布。Linux 产物为静态二进制，不依赖系统 glibc，可在 glibc 2.28（RHEL8/CentOS8 系）、老版本 CentOS7 以及 Alpine/musl 环境运行。macOS 产物未做 Apple 签名和公证。
 
 仓库需启用 GitHub Actions，并允许发布 job 使用 `GITHUB_TOKEN` 的 `contents: write` 权限；无需额外配置 PAT 或云服务密钥。下载地址为仓库的 [Releases 页面](https://github.com/jasperbigsum-commits/s3async/releases)。上传失败时可重跑流水线完成草稿发布，已公开发布的版本则拒绝覆盖。
 
@@ -253,21 +253,7 @@ git push origin v1.3.0-rc.1
 # 生成 dist/s3async-windows-amd64.zip
 ```
 
-**C 编译器要求：** Windows 下如果出现 `cgo: C compiler "gcc" not found`，说明没有可用的 C 编译器。推荐安装 MSYS2 并使用 mingw-w64：
-
-```powershell
-# 安装 MSYS2 后，在 MSYS2 shell 中运行
-pacman -Syu
-pacman -S mingw-w64-x86_64-gcc
-```
-
-然后将 MSYS2 的 `mingw64\bin` 添加到系统 `PATH`，或者在 PowerShell 中先设置：
-
-```powershell
-$env:PATH += ";C:\msys64\mingw64\bin"
-```
-
-重新运行脚本即可。
+**C 编译器要求：** 本项目已切换为纯 Go SQLite（`github.com/ncruces/go-sqlite3`），`CGO_ENABLED=0` 即可构建，无需安装 C 编译器、无需 MSYS2/mingw-w64。
 
 ### Linux 构建
 
@@ -283,14 +269,14 @@ chmod +x scripts/build-linux.sh
 ./scripts/build-linux.sh --out myapp
 # 生成 dist/myapp
 
-# 交叉编译为 Windows（需要 mingw-w64）
+# 交叉编译为 Windows（纯 Go，无需 mingw-w64）
 ./scripts/build-linux.sh --target windows --out s3async
 # 生成 dist/s3async.exe
 ```
 
 ### 依赖说明
 
-本项目使用 `github.com/mattn/go-sqlite3`，该驱动依赖 CGO 与系统 C 编译器。如果要在 CI 中交叉编译，请确保安装并配置了对应的 mingw 工具链，或考虑替换为纯 Go 驱动（例如 `modernc.org/sqlite`）以避免 CGO。
+本项目使用 `github.com/ncruces/go-sqlite3/driver`（纯 Go、CGO-free 的 SQLite 驱动，`database/sql` 驱动名为 `sqlite3`，与旧 `mattn/go-sqlite3` 兼容）。构建时设置 `CGO_ENABLED=0` 即可产出静态二进制，可在老 glibc（2.28）和 Alpine/musl 上直接运行，无需 C 工具链即可交叉编译。
 
 
 

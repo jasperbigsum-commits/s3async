@@ -62,7 +62,7 @@ jobs:
             goarch: amd64
             binary: s3async.exe
     env:
-      CGO_ENABLED: '1'
+      CGO_ENABLED: '0'
       GOOS: ${{ matrix.goos }}
       GOARCH: ${{ matrix.goarch }}
       VERSION: ${{ needs.validate.outputs.version }}
@@ -77,38 +77,17 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Set up Windows C compiler
-        id: msys2
-        if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          update: true
-          install: mingw-w64-ucrt-x86_64-gcc
-
-      - name: Add Windows C compiler to PATH
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
-        run: |
-          Join-Path $env:MSYS2_LOCATION 'ucrt64\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          'CC=gcc' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
       - name: Test
         run: go test -timeout 10m ./...
 
       - name: Race detector (Linux)
         if: runner.os == 'Linux'
-        run: go test -race -timeout 10m ./...
+        run: CGO_ENABLED=1 go test -race -timeout 10m ./...
 
       - name: Build executable
         run: |
           mkdir -p dist/package
           flags="-s -w -X github.com/jasperbigsum-commits/s3async/cmd.version=$VERSION"
-          if [[ "$GOOS" == windows ]]; then
-            flags="$flags -extldflags=-static"
-          fi
           go build -trimpath -ldflags "$flags" -o "dist/package/$BINARY" .
           actual_version=$("./dist/package/$BINARY" version)
           test "${actual_version//$'\r'/}" = "$VERSION"

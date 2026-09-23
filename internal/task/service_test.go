@@ -621,3 +621,46 @@ func TestExecuteNextQueuedTaskClaimsOldestQueued(t *testing.T) {
 		t.Fatalf("second task status = %s, want %s", secondTask.Status, StatusQueued)
 	}
 }
+
+type blockingUploader struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (u *blockingUploader) UploadFile(bucket, key, localPath string) error {
+	u.once.Do(func() { close(u.started) })
+	<-u.release
+	return nil
+}
+
+func TestExecuteTaskRejectsDuplicateInProcessExecution(t *testing.T) {
+	repo := newMemoryRepo()
+	service := NewService(repo, nil)
+	created, err := service.CreateTask("./data", "bucket", "", false, []Item{{
+		Path: "a.txt", RelativePath: "a.txt", Size: 1,
+	}})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	uploader := &blockingUploader{started: make(chan struct{}), release: make(chan struct{})}
+	firstErr := make(chan error, 1)
+	go func() {
+		firstErr <- service.ExecuteTask(created.ID, uploader, ExecutionConfig{Workers: 1, MaxAttempts: 1})
+	}()
+	select {
+	case <-uploader.started:
+	case <-time.After(time.Second):
+		t.Fatal("first execution did not start transfer")
+	}
+
+	if err := service.ExecuteTask(created.ID, &fakeUploader{failures: map[string]int{}}, ExecutionConfig{Workers: 1, MaxAttempts: 1}); err == nil || !strings.Contains(err.Error(), "already running") {
+		t.Fatalf("duplicate ExecuteTask() error = %v, want already running", err)
+	}
+
+	close(uploader.release)
+	if err := <-firstErr; err != nil {
+		t.Fatalf("first ExecuteTask() error = %v", err)
+	}
+}

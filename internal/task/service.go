@@ -30,7 +30,7 @@ type Uploader interface {
 }
 
 type Downloader interface {
-	DownloadFile(bucket string, key string, root string, relativePath string) error
+	DownloadFile(bucket string, key string, root string, relativePath string, size int64) error
 }
 
 type ExecutionConfig struct {
@@ -45,17 +45,54 @@ type ExecutionConfig struct {
 type Service struct {
 	repo     Repository
 	recorder EventRecorder
+
+	// running prevents two execution entry points in the same process from
+	// transferring the same task at the same time. The repository claim is the
+	// cross-process guard; this is the fast in-process half for repositories
+	// that do not implement taskClaimer (and avoids duplicate work before a
+	// second database round trip).
+	runningMu    sync.Mutex
+	runningTasks map[string]struct{}
 }
 
 func NewService(repo Repository, recorder EventRecorder) *Service {
-	return &Service{repo: repo, recorder: recorder}
+	return &Service{
+		repo:         repo,
+		recorder:     recorder,
+		runningTasks: make(map[string]struct{}),
+	}
+}
+
+func (s *Service) acquireTaskExecution(id string) bool {
+	s.runningMu.Lock()
+	defer s.runningMu.Unlock()
+	if s.runningTasks == nil {
+		s.runningTasks = make(map[string]struct{})
+	}
+	if _, exists := s.runningTasks[id]; exists {
+		return false
+	}
+	s.runningTasks[id] = struct{}{}
+	return true
+}
+
+func (s *Service) releaseTaskExecution(id string) {
+	s.runningMu.Lock()
+	delete(s.runningTasks, id)
+	s.runningMu.Unlock()
 }
 
 func (s *Service) emitEvent(eventType string, t Task, item Item, items []Item, cfg ExecutionConfig, message string, errMsg string) {
+	s.emitEventWithSummary(eventType, t, item, BuildSummary(items), cfg, message, errMsg)
+}
+
+// emitEventWithSummary is the hot-path variant: the caller passes the
+// already-maintained summary so per-item events stay O(1) instead of
+// rescanning the whole item list on every status change.
+func (s *Service) emitEventWithSummary(eventType string, t Task, item Item, summary Summary, cfg ExecutionConfig, message string, errMsg string) {
 	if s.recorder == nil {
 		return
 	}
-	summary := BuildSummary(items)
 	event := NewTaskEvent(eventType, t, item, cfg, summary, message, errMsg)
 	_ = s.recorder.Record(event)
 }
@@ -194,6 +231,11 @@ func (s *Service) RetryTask(id string) error {
 }
 
 func (s *Service) ExecuteTask(id string, uploader Uploader, cfg ExecutionConfig) error {
+	if !s.acquireTaskExecution(id) {
+		return fmt.Errorf("task %s is already running", id)
+	}
+	defer s.releaseTaskExecution(id)
+
 	if claimer, ok := s.repo.(taskClaimer); ok {
 		claimed, claimedOK, claimErr := claimer.ClaimTask(id)
 		if claimErr != nil {
@@ -220,6 +262,10 @@ func (s *Service) ExecuteNextQueuedTask(uploader Uploader, cfg ExecutionConfig) 
 	if !ok {
 		return Task{}, false, nil
 	}
+	if !s.acquireTaskExecution(claimedTask.ID) {
+		return claimedTask, true, fmt.Errorf("task %s is already running", claimedTask.ID)
+	}
+	defer s.releaseTaskExecution(claimedTask.ID)
 
 	if err := s.executeLoadedTask(claimedTask, uploader, cfg, true); err != nil {
 		return claimedTask, true, err
@@ -244,7 +290,7 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 		}
 		activeStatus = ItemStatusDownloading
 		transfer = func(item Item, key string) error {
-			return downloader.DownloadFile(t.Bucket, key, t.Source, item.RelativePath)
+			return downloader.DownloadFile(t.Bucket, key, t.Source, item.RelativePath, item.Size)
 		}
 	}
 	if cfg.Workers <= 0 {
@@ -298,7 +344,15 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 	var mu sync.Mutex
 	var executionErrMu sync.Mutex
 	var executionErr error
-	workCh := make(chan Item, len(items))
+	// Keep the dispatcher bounded. AWS CLI's s3 transfer manager separates
+	// the producer from a bounded executor; using a small queue here avoids
+	// retaining a second copy of a very large task's item list and ensures the
+	// number of active transfers is controlled solely by cfg.Workers.
+	queueSize := cfg.Workers * 2
+	if queueSize < 1 {
+		queueSize = 1
+	}
+	workCh := make(chan Item, queueSize)
 	var wg sync.WaitGroup
 
 	setExecutionErr := func(err error) {
@@ -318,13 +372,27 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 		return executionErr
 	}
 
-	persistProgress := func() error {
-		t.UpdatedAt = time.Now().UTC()
-		ApplySummary(&t, BuildSummary(items))
-		t.LastError = latestError(items)
+	currentSummary := BuildSummary(items)
+	t.LastError = latestError(items)
+	lastPersistedAt := time.Now().UTC()
+	itemIndex := make(map[string]int, len(items))
+	for i := range items {
+		if _, exists := itemIndex[items[i].RelativePath]; !exists {
+			itemIndex[items[i].RelativePath] = i
+		}
+	}
+
+	persistProgressLocked := func(force bool) error {
+		now := time.Now().UTC()
+		if !force && now.Sub(lastPersistedAt) < 500*time.Millisecond {
+			return nil
+		}
+		t.UpdatedAt = now
+		ApplySummary(&t, currentSummary)
 		if err := s.repo.UpdateTask(t); err != nil {
 			return fmt.Errorf("update task progress: %w", err)
 		}
+		lastPersistedAt = now
 		return nil
 	}
 
@@ -333,41 +401,38 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 		defer mu.Unlock()
 
 		now := time.Now().UTC()
-		for i := range items {
-			if items[i].RelativePath != relativePath {
-				continue
+		idx, ok := itemIndex[relativePath]
+		if ok {
+			oldStatus := items[idx].Status
+			currentSummary = MoveSummaryItem(currentSummary, oldStatus, status, items[idx].Size)
+			items[idx].Status = status
+			items[idx].Error = errMsg
+			items[idx].UpdatedAt = now
+			if errMsg != "" {
+				t.LastError = errMsg
 			}
-			items[i].Status = status
-			items[i].Error = errMsg
-			items[i].UpdatedAt = now
 			switch status {
 			case ItemStatusUploading, ItemStatusDownloading:
-				items[i].AttemptCount++
-				items[i].StartedAt = &now
-				items[i].CompletedAt = nil
+				items[idx].AttemptCount++
+				items[idx].StartedAt = &now
+				items[idx].CompletedAt = nil
 			case ItemStatusSuccess, ItemStatusFailed, ItemStatusSkipped:
-				items[i].CompletedAt = &now
+				items[idx].CompletedAt = &now
 			}
-			break
 		}
-		if err := persistProgress(); err != nil {
+
+		// Task-level counters are advisory progress: throttle every write and
+		// let the flush after wg.Wait() persist the authoritative final state.
+		if err := persistProgressLocked(false); err != nil {
 			return err
 		}
-		if updatedItem, ok := FindItemByRelativePath(items, relativePath); ok {
-			s.emitEvent("item_status_changed", t, updatedItem, items, cfg, fmt.Sprintf("item moved to %s", status), errMsg)
+		if ok {
+			s.emitEventWithSummary("item_status_changed", t, items[idx], currentSummary, cfg, fmt.Sprintf("item moved to %s", status), errMsg)
 		}
 		return nil
 	}
 
 	normalizedPrefix := normalizeObjectPrefix(t.Prefix)
-
-	for _, item := range items {
-		if item.Status == ItemStatusSuccess || item.Status == ItemStatusSkipped {
-			continue
-		}
-		workCh <- item
-	}
-	close(workCh)
 
 	for i := 0; i < cfg.Workers; i++ {
 		wg.Add(1)
@@ -433,6 +498,16 @@ func (s *Service) executeLoadedTask(t Task, uploader Uploader, cfg ExecutionConf
 		}()
 	}
 
+	// Dispatch only after workers are live. This is the bounded-executor
+	// pattern used by the AWS CLI: the producer applies backpressure instead
+	// of enqueueing the entire task before any transfer can start.
+	for _, item := range items {
+		if item.Status == ItemStatusSuccess || item.Status == ItemStatusSkipped {
+			continue
+		}
+		workCh <- item
+	}
+	close(workCh)
 	wg.Wait()
 
 	if err := getExecutionErr(); err != nil {

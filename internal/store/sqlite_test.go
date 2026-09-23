@@ -1,7 +1,9 @@
 package store
 
 import (
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -168,4 +170,79 @@ func newTestSQLiteRepo(t *testing.T) (*SQLiteTaskRepository, string) {
 		}
 	})
 	return repo, dbPath
+}
+
+func TestSQLiteRepositoryClaimNextQueuedIsAtomicAcrossRepositories(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	first, err := NewSQLiteTaskRepository(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteTaskRepository(first) error = %v", err)
+	}
+	defer first.Close()
+	second, err := NewSQLiteTaskRepository(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteTaskRepository(second) error = %v", err)
+	}
+	defer second.Close()
+
+	now := time.Now().UTC()
+	queued := task.Task{
+		ID:           "atomic-claim",
+		Source:       "/source",
+		Bucket:       "bucket",
+		Mode:         "update",
+		Status:       task.StatusQueued,
+		TotalItems:   1,
+		PendingItems: 1,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := first.Create(queued, []task.Item{{
+		TaskID:       queued.ID,
+		Path:         "/source/a.txt",
+		RelativePath: "a.txt",
+		Size:         1,
+		Status:       task.ItemStatusPending,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	claims := 0
+	errs := make(chan error, 16)
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			repo := first
+			if i%2 == 1 {
+				repo = second
+			}
+			claimed, ok, err := repo.ClaimNextQueued()
+			if err != nil {
+				errs <- err
+				return
+			}
+			if ok {
+				if claimed.ID != queued.ID || claimed.Status != task.StatusRunning {
+					errs <- fmt.Errorf("unexpected claim: %+v", claimed)
+					return
+				}
+				mu.Lock()
+				claims++
+				mu.Unlock()
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	if claims != 1 {
+		t.Fatalf("claims = %d, want exactly 1", claims)
+	}
 }

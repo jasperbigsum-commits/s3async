@@ -96,7 +96,7 @@ func TestDownloadReplacementAndFailureCleanup(t *testing.T) {
 			if err := os.WriteFile(local, []byte("old"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			err := client.DownloadFile("bucket", "backup/file.txt", root, "file.txt")
+			err := client.DownloadFile("bucket", "backup/file.txt", root, "file.txt", 3)
 			if (err != nil) != broken {
 				t.Fatalf("error=%v broken=%v", err, broken)
 			}
@@ -134,7 +134,7 @@ func TestLocalPathRejectsUnsafeKeysAndSymlinks(t *testing.T) {
 func TestDownloadDryRunDoesNotCreateDestination(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "missing")
 	client := &Client{dryRun: true}
-	if err := client.DownloadFile("bucket", "a", root, "sub/a"); err != nil {
+	if err := client.DownloadFile("bucket", "a", root, "sub/a", 0); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
@@ -194,7 +194,7 @@ func TestDownloadPreservesDotKey(t *testing.T) {
 		fmt.Fprint(w, "data")
 	})
 	root := t.TempDir()
-	if err := client.DownloadFile("bucket", "backup/sub/./a.txt", root, "sub/./a.txt"); err != nil {
+	if err := client.DownloadFile("bucket", "backup/sub/./a.txt", root, "sub/./a.txt", 4); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(root, "sub", "a.txt"))
@@ -222,7 +222,7 @@ func TestSlashFolderDownload(t *testing.T) {
 	if len(items) != 1 || items[0].RelativePath != "/a.txt" || items[0].Path != filepath.Join(root, "a.txt") {
 		t.Fatalf("%+v", items)
 	}
-	if err := client.DownloadFile("bucket", "backup/"+items[0].RelativePath, root, items[0].RelativePath); err != nil {
+	if err := client.DownloadFile("bucket", "backup/"+items[0].RelativePath, root, items[0].RelativePath, items[0].Size); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -393,7 +393,7 @@ func TestFaithfulDownloadPreservesExactKey(t *testing.T) {
 	if len(items) != 1 || items[0].Path != filepath.Join(root, "%2F", "a.txt") {
 		t.Fatalf("%+v", items)
 	}
-	if err := client.DownloadFile("bucket", "backup/"+items[0].RelativePath, root, items[0].RelativePath); err != nil {
+	if err := client.DownloadFile("bucket", "backup/"+items[0].RelativePath, root, items[0].RelativePath, items[0].Size); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(root, "%2F", "a.txt"))
@@ -434,5 +434,31 @@ func TestFaithfulSymlinkStillRejected(t *testing.T) {
 	// backslash-style segments is still rejected.
 	if _, err := LocalPathWithStyle(root, `a\b`, task.PathFaithful); err == nil {
 		t.Fatal("faithful accepted backslash segment")
+	}
+}
+
+func TestPlanDownloadDedupesRepeatedKey(t *testing.T) {
+	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<ListBucketResult><Contents><Key>prod/a.jpg</Key><Size>1</Size></Contents><Contents><Key>prod/a.jpg</Key><Size>1</Size></Contents><Contents><Key>prod/b.jpg</Key><Size>2</Size></Contents></ListBucketResult>`)
+	})
+	items, err := client.PlanDownload(context.Background(), "bucket", "prod", t.TempDir(), nil, nil, CollisionFail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].RelativePath != "a.jpg" || items[1].RelativePath != "b.jpg" {
+		t.Fatalf("items=%+v", items)
+	}
+}
+
+func TestPlanDownloadDuplicateKeepsLatestState(t *testing.T) {
+	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<ListBucketResult><Contents><Key>prod/a.jpg</Key><Size>1</Size></Contents><Contents><Key>prod/a.jpg</Key><Size>2</Size></Contents></ListBucketResult>`)
+	})
+	items, err := client.PlanDownload(context.Background(), "bucket", "prod", t.TempDir(), nil, nil, CollisionFail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Size != 2 {
+		t.Fatalf("items=%+v, want single item with latest size 2", items)
 	}
 }

@@ -19,9 +19,11 @@
 
 | 命令 | 说明 |
 | --- | --- |
-| `s3async sync <local-path>` | 上传本地目录到 S3 |
+| `s3async sync <local-path>` | 增量上传本地目录到 S3 |
 | `s3async sync <local-path> --download` | 下载 S3 前缀到本地目录 |
-| `s3async sync <local-path> --incremental` | 增量同步，跳过未变化文件（上传和下载均支持） |
+| `s3async sync <local-path> --force` | 强制传输所有筛选出的文件 |
+| `s3async sync <local-path> --exact-timestamps` | 下载时也按 S3 与本地修改时间比较同大小文件 |
+| `s3async sync <local-path> --checksum` | 请求并比较可用的完整对象 SHA-256（会增加 HEAD 请求） |
 | `s3async sync <local-path> --from <RFC3339>` | 只同步指定时间之后修改的文件 |
 | `s3async sync <local-path> --to <RFC3339>` | 只同步指定时间之前修改的文件 |
 | `s3async sync <local-path> --timezone <区域>` | 指定不带时区日期参数的解释时区，默认使用本地时区 |
@@ -45,8 +47,11 @@ s3async sync ./data --bucket my-bucket --prefix backup/ --async
 # 上传目录并在当前终端等待完成
 s3async sync ./data --config examples/config.yaml --async=false
 
-# 增量上传：目标端未变化的文件会标记为 skipped
-s3async sync ./data --bucket my-bucket --prefix backup/ --incremental --async=false
+# 默认增量上传：目标端未变化的文件会标记为 skipped
+s3async sync ./data --bucket my-bucket --prefix backup/ --async=false
+
+# 强制上传所有匹配文件
+s3async sync ./data --bucket my-bucket --prefix backup/ --force --async=false
 
 # 按修改时间范围同步（时间格式为 RFC3339）
 s3async sync ./data --from 2026-01-01T00:00:00Z --to 2026-01-31T23:59:59Z
@@ -57,7 +62,22 @@ s3async task status <task-id> --failed-limit 20
 s3async task events --task-id <task-id> --limit 100
 ```
 
-增量规划需要列举 S3 对象，因此账号需要 `s3:ListBucket` 权限。源端删除的文件不会从 S3 删除。
+增量上传需要 `s3:ListBucket`；启用 `--checksum` 还需要 `s3:GetObject`。下载需要 `s3:ListBucket` 和 `s3:GetObject`。源端删除的文件不会从 S3 删除。
+
+`--include` 和 `--exclude` 按命令行中的出现顺序处理；同一个文件匹配多个规则时，最后匹配的规则生效。单独使用 `--include` 时仍作为白名单。示例：先排除所有文件，再重新包含 CSV：
+
+```bash
+s3async sync ./data --exclude "*" --include "*.csv" --bucket my-bucket --async=false
+```
+
+### 与 AWS CLI `aws s3 sync` 的同步判定
+
+| 方向 | 默认判定 | 额外判定 |
+| --- | --- | --- |
+| 本地 -> S3 | 对象不存在或大小不同则上传；大小相同则仅当本地更新才上传 | `--checksum` 比较可用的完整 SHA-256；`--force` 强制上传 |
+| S3 -> 本地 | 本地文件不存在或大小不同时下载；大小相同默认跳过 | `--exact-timestamps` 还比较时间；`--checksum` 比较可用的完整 SHA-256 |
+
+默认同步会自动进行上述差异判定，`--incremental` 保留为兼容选项；`--incremental=false` 与 `--force` 一样强制传输。`--checksum` 默认关闭，避免每个同大小对象额外发起 HEAD 请求；启用时，仅比较 S3 返回的完整对象 SHA-256，multipart composite checksum 不当作整文件校验和使用。前缀、include/exclude 和时间范围会在对象内容比较前筛选候选文件。当前没有目标端删除功能；AWS CLI 的 `--delete` 不会被隐式执行。
 
 `--from` 和 `--to` 可单独或同时使用。`--timezone` 默认读取运行机器的本地时区，也可以指定 IANA 时区名称，例如 `Asia/Shanghai`、`America/New_York` 或 `UTC`。日期参数可以写完整 RFC3339（如 `2026-01-01T00:00:00+08:00`），也可以写不带时区的 `YYYY-MM-DD` 或 `YYYY-MM-DD HH:MM:SS`，后者按 `--timezone` 解释。日期格式的 `--to 2026-01-31` 会包含当天结束时间。
 
@@ -99,7 +119,9 @@ s3async sync ./restore --download --bucket my-bucket --prefix "" --include "*.tx
 
 `--download` 将本地路径解释为目标目录，自动创建所需子目录。`--bucket`、`--prefix`、配置文件和环境变量的解析方式与上传一致。前缀按目录处理（`backup` 与 `backup/` 等价），过滤规则作用于去掉前缀后的相对路径；跳过 S3 目录标记。
 
-默认每次任务会下载所有匹配对象并覆盖本地同名文件；使用 `--incremental` 时，大小和修改时间均未变化的文件会标记为 `skipped`。不删除本地多余文件，也不执行删除同步。下载先写入同目录临时文件，完整接收后再替换目标文件；失败时保留原文件并清理临时文件。保留 S3 返回的最后修改时间。拒绝路径穿越、目标路径中的符号链接、仅大小写不同的重名对象以及文件/目录冲突。
+默认执行增量同步。同大小文件默认跳过；使用 `--checksum` 时，如果 S3 提供完整对象 SHA-256，则按内容决定是否跳过。使用 `--exact-timestamps` 后，校验和不可用时仅当 S3 `LastModified` 晚于本地文件修改时间才下载。`--force` 会重新传输所有匹配文件。不删除本地多余文件，也不执行删除同步。下载先写入同目录临时文件，完整接收后再替换目标文件；失败时保留原文件并清理临时文件。保留 S3 返回的最后修改时间。拒绝路径穿越、目标路径中的符号链接、仅大小写不同的重名对象以及文件/目录冲突。
+
+上传方向在大小相同时，默认仅当本地文件比 S3 对象更新才上传。使用 `--checksum` 可额外比较完整对象 SHA-256；校验和不可用时回退到时间判断。multipart composite checksum 不与整文件 SHA-256 混用。`--force` 跳过比较，直接传输。
 
 查询任务时应使用创建任务时的同一份配置，否则可能查询到另一个数据库：
 
@@ -300,7 +322,7 @@ s3async sync ./data --bucket my-bucket --prefix 'backup/./' --async=false
 
 本地文件系统无法保留独立的 `.` 目录名称，因此下载后重新上传不会自动还原 key 中的 `./`；需要通过 `--prefix` 指定相应前缀。过滤规则仍匹配去掉前缀后的原始相对 key。
 
-若 `a.txt` 与 `./a.txt` 同时存在，或规范化后出现文件/目录冲突，默认规划会报错并同时打出两个完整 key 和冲突的本地路径，避免互相覆盖。`../` 和目标路径中的符号链接仍不允许。S3 key 开头的 `/` 仅作为对象名处理，不会写入本地绝对路径。
+若 `a.txt` 与 `./a.txt` 同时存在，或规范化后出现文件/目录冲突，默认规划会报错并同时打出两个完整 key 和冲突的本地路径，避免互相覆盖。存储在并发写入时可能在分页列举中把同一个 key 返回两次，这种精确重复会自动去重（以后页为准），不算冲突。`../` 和目标路径中的符号链接仍不允许。S3 key 开头的 `/` 仅作为对象名处理，不会写入本地绝对路径。
 
 ```bash
 # 碰撞时跳过打架的对象、下载其余文件（跳过项记为 skipped，可在 task status 里看到原因）

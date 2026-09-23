@@ -5,6 +5,7 @@
 ### Added
 - `path_style: faithful` config: reversible `%2F`/`%2E`/`%2E%2E` escaping so S3 keys with empty or dot segments (e.g. `backup//a.txt`) restore to distinct local paths; uploads decode back to the true keys. `s3async validate` prints the active style.
 - `--on-collision skip` flag for `sync --download`: colliding objects become skipped items with reasons instead of aborting the whole plan; collision errors now name both full S3 keys plus the shared local file.
+- Download planning dedupes exactly repeated S3 keys across LIST pages (concurrent bucket writes can repeat keys), keeping the latest listing state.
 - Config loader with file + env support.
 - Task item persistence in SQLite.
 - Source scanning with relative path capture.
@@ -34,6 +35,7 @@
 - Async background execution now launches queue-aware worker mode instead of only a raw `task run` subprocess.
 - Task execution now fails fast when repository updates for item/task progress cannot be persisted.
 - Runtime observability is now split between daemon lifecycle audit logs and per-task execution event logs.
+- Task execution now uses a bounded worker queue and process-local duplicate-execution guard; SQLite queue claims use one atomic conditional update so concurrent workers cannot claim the same task.
 
 ### Pending
 - Dedicated installable background daemon / service mode.

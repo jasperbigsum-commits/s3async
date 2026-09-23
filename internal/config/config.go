@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,6 +37,9 @@ type S3Config struct {
 	ForcePathStyle    bool
 	SkipTLSVerify     bool
 	CACertFile        string
+	MultipartThreshold int64
+	MultipartChunkSize int64
+	PartConcurrency    int
 	StaticCredentials StaticCredentialsConfig
 }
 
@@ -78,6 +82,9 @@ func Load(configPath string) (Config, error) {
 	v.SetDefault("workers", 4)
 	v.SetDefault("path_style", "collapse")
 	v.SetDefault("s3.request_timeout", "30s")
+	v.SetDefault("s3.multipart_threshold", "8MB")
+	v.SetDefault("s3.multipart_chunksize", "8MB")
+	v.SetDefault("s3.part_concurrency", 4)
 	v.SetDefault("database_path", filepath.Join(homeDir, ".s3async", "tasks.db"))
 	v.SetDefault("state_dir", filepath.Join(homeDir, ".s3async"))
 	v.SetDefault("retry.max_attempts", 3)
@@ -191,6 +198,35 @@ func resolveS3Config(v *viper.Viper, legacy Config) (S3Config, error) {
 	}
 	s3Cfg.RequestTimeout = timeout
 
+	thresholdText := v.GetString("s3.multipart_threshold")
+	if thresholdText == "" {
+		thresholdText = "8MB"
+	}
+	threshold, err := parseByteSize(thresholdText)
+	if err != nil || threshold <= 0 {
+		return S3Config{}, fmt.Errorf("s3.multipart_threshold must be a positive byte size (e.g. 8388608, 8MB, 1GB)")
+	}
+	s3Cfg.MultipartThreshold = threshold
+
+	chunkText := v.GetString("s3.multipart_chunksize")
+	if chunkText == "" {
+		chunkText = "8MB"
+	}
+	chunkSize, err := parseByteSize(chunkText)
+	if err != nil || chunkSize < 5*1024*1024 {
+		return S3Config{}, fmt.Errorf("s3.multipart_chunksize must be a byte size of at least 5MB (e.g. 8MB, 16MB)")
+	}
+	s3Cfg.MultipartChunkSize = chunkSize
+
+	concurrency := v.GetInt("s3.part_concurrency")
+	if concurrency == 0 {
+		concurrency = 4
+	}
+	if concurrency < 1 {
+		return S3Config{}, fmt.Errorf("s3.part_concurrency must be at least 1")
+	}
+	s3Cfg.PartConcurrency = concurrency
+
 	// Apply defaults from legacy if not set in s3.*
 	if s3Cfg.Profile == "" {
 		s3Cfg.Profile = legacy.Profile
@@ -226,4 +262,42 @@ func resolveS3Config(v *viper.Viper, legacy Config) (S3Config, error) {
 	}
 
 	return s3Cfg, nil
+}
+
+// parseByteSize parses human-readable byte sizes in aws-cli style: a plain
+// integer means bytes, otherwise an integer or decimal number with a
+// case-insensitive B/KB/MB/GB/TB suffix (1024-based, e.g. "8MB", "1.5GB").
+func parseByteSize(value string) (int64, error) {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return 0, fmt.Errorf("empty byte size")
+	}
+	i := 0
+	for i < len(text) && (text[i] >= '0' && text[i] <= '9' || text[i] == '.') {
+		i++
+	}
+	number, suffix := text[:i], strings.ToUpper(strings.TrimSpace(text[i:]))
+	if number == "" {
+		return 0, fmt.Errorf("invalid byte size %q", value)
+	}
+	amount, err := strconv.ParseFloat(number, 64)
+	if err != nil || amount < 0 {
+		return 0, fmt.Errorf("invalid byte size %q", value)
+	}
+	var multiplier float64 = 1
+	switch suffix {
+	case "", "B":
+		multiplier = 1
+	case "K", "KB", "KIB":
+		multiplier = 1 << 10
+	case "M", "MB", "MIB":
+		multiplier = 1 << 20
+	case "G", "GB", "GIB":
+		multiplier = 1 << 30
+	case "T", "TB", "TIB":
+		multiplier = 1 << 40
+	default:
+		return 0, fmt.Errorf("invalid byte size %q", value)
+	}
+	return int64(amount * multiplier), nil
 }

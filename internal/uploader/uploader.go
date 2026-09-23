@@ -18,22 +18,36 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
+	tmtypes "github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	cfgpkg "github.com/jasperbigsum-commits/s3async/internal/config"
+	"github.com/jasperbigsum-commits/s3async/internal/filter"
 	"github.com/jasperbigsum-commits/s3async/internal/task"
 )
 
 type Client struct {
-	s3        *s3.Client
-	dryRun    bool
-	timeout   time.Duration
-	pathStyle task.PathStyle
+	s3                 *s3.Client
+	tm                 *transfermanager.Client
+	dryRun             bool
+	timeout            time.Duration
+	pathStyle          task.PathStyle
+	filterRules        []filter.Rule
+	multipartThreshold int64
 }
 
-// PlanIncrementalUpload compares local files with objects under prefix. Files whose
-// size and modification time match the remote object are marked as skipped.
-func (c *Client) PlanIncrementalUpload(ctx context.Context, bucket, prefix string, items []task.Item) ([]task.Item, error) {
+// Transfer defaults mirror aws-cli s3 transfer config.
+const (
+	defaultMultipartThreshold = 8 << 20
+	defaultMultipartChunkSize = 8 << 20
+	defaultPartConcurrency    = 4
+	minUploadPartSize         = 5 << 20
+)
+
+// PlanIncrementalUpload compares local files with S3 objects using directional
+// modification-time rules and a full-object checksum when the server provides one.
+func (c *Client) PlanIncrementalUpload(ctx context.Context, bucket, prefix string, items []task.Item, verifyChecksum ...bool) ([]task.Item, error) {
 	if c.s3 == nil || bucket == "" {
 		return nil, fmt.Errorf("S3 client and bucket are required to plan incremental upload")
 	}
@@ -58,6 +72,7 @@ func (c *Client) PlanIncrementalUpload(ctx context.Context, bucket, prefix strin
 		}
 	}
 
+	verify := len(verifyChecksum) > 0 && verifyChecksum[0]
 	for i := range items {
 		relativePath := filepath.ToSlash(items[i].RelativePath)
 		remoteKey := relativePath
@@ -70,30 +85,70 @@ func (c *Client) PlanIncrementalUpload(ctx context.Context, bucket, prefix strin
 		if !ok || object.Size == nil || object.LastModified == nil || *object.Size != items[i].Size {
 			continue
 		}
-		matches := items[i].ModTime.UTC().Truncate(time.Second).Equal(object.LastModified.UTC().Truncate(time.Second))
-		headCtx, cancel := context.WithTimeout(ctx, c.timeout)
-		head, headErr := c.s3.HeadObject(headCtx, &s3.HeadObjectInput{Bucket: &bucket, Key: aws.String(prefix + remoteKey)})
-		cancel()
-		if headErr == nil {
-			if head.ChecksumSHA256 != nil {
-				if file, openErr := os.Open(items[i].Path); openErr == nil {
-					h := sha256.New()
-					_, copyErr := io.Copy(h, file)
-					_ = file.Close()
-					if copyErr == nil {
-						matches = base64.StdEncoding.EncodeToString(h.Sum(nil)) == *head.ChecksumSHA256
-					}
-				}
-			}
-			if stored, parseErr := strconv.ParseInt(head.Metadata["s3async-modtime-ns"], 10, 64); parseErr == nil {
-				matches = stored == items[i].ModTime.UTC().UnixNano()
-			}
+		matches, compareErr := c.localMatchesRemote(ctx, bucket, prefix+remoteKey, items[i].Path, items[i].Size, items[i].ModTime, *object.LastModified, true, true, verify)
+		if compareErr != nil {
+			return nil, fmt.Errorf("compare local file %s with S3 object: %w", relativePath, compareErr)
 		}
 		if matches {
 			items[i].Status = task.ItemStatusSkipped
 		}
 	}
 	return items, nil
+}
+
+// localMatchesRemote applies directional sync comparison after the size has
+// matched. Full-object SHA-256 checksums are strongest; multipart composite
+// checksums cannot be compared with a whole-file digest and are ignored.
+func (c *Client) localMatchesRemote(ctx context.Context, bucket, key, localPath string, expectedSize int64, localModTime, remoteModTime time.Time, exactTimestamps bool, upload bool, verifyChecksum bool) (bool, error) {
+	file, err := os.Open(localPath)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return false, err
+	}
+	if info.Size() != expectedSize || !info.ModTime().Equal(localModTime) {
+		// The source changed after planning. Transfer it instead of trusting
+		// stale size or timestamp data captured by the initial scan.
+		return false, nil
+	}
+	if verifyChecksum {
+		headCtx, cancel := context.WithTimeout(ctx, c.timeout)
+		head, headErr := c.s3.HeadObject(headCtx, &s3.HeadObjectInput{Bucket: &bucket, Key: aws.String(key), ChecksumMode: types.ChecksumModeEnabled})
+		cancel()
+		if headErr == nil {
+			if checksum, ok := usableChecksumValue(head.ChecksumSHA256, head.ChecksumType); ok {
+				h := sha256.New()
+				if _, err := io.Copy(h, file); err != nil {
+					return false, fmt.Errorf("hash local file %s: %w", localPath, err)
+				}
+				return base64.StdEncoding.EncodeToString(h.Sum(nil)) == checksum, nil
+			}
+			if stored, parseErr := strconv.ParseInt(head.Metadata["s3async-modtime-ns"], 10, 64); parseErr == nil && stored == localModTime.UTC().UnixNano() {
+				return true, nil
+			}
+		}
+	}
+	if upload {
+		return !localModTime.After(remoteModTime), nil
+	}
+	if !exactTimestamps {
+		return true, nil
+	}
+	return !remoteModTime.After(info.ModTime()), nil
+}
+
+func usableChecksumValue(checksum *string, checksumType types.ChecksumType) (string, bool) {
+	if checksum == nil || checksumType == types.ChecksumTypeComposite {
+		return "", false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(*checksum)
+	if err != nil || len(decoded) != sha256.Size {
+		return "", false
+	}
+	return *checksum, true
 }
 
 // clientOptions holds the resolved options for building the S3 client
@@ -121,14 +176,28 @@ func buildClientOptions(cfg cfgpkg.Config) clientOptions {
 	}
 }
 
-func buildHTTPClient(opts clientOptions) (*http.Client, error) {
-	transport := http.DefaultTransport
+func buildHTTPClient(opts clientOptions, timeout time.Duration, maxIdleConnsPerHost int) (*http.Client, error) {
+	// Clone the defaults (proxy, keep-alives) instead of mutating the shared
+	// transport. Idle pool sizing follows the effective transfer concurrency
+	// so part streams reuse keep-alive connections instead of re-handshaking.
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf("unexpected default transport type %T", http.DefaultTransport)
+	}
+	transport := base.Clone()
+	if maxIdleConnsPerHost > 0 {
+		transport.MaxIdleConnsPerHost = maxIdleConnsPerHost
+		if transport.MaxIdleConns < maxIdleConnsPerHost*2 {
+			transport.MaxIdleConns = maxIdleConnsPerHost * 2
+		}
+	}
+	// Bounds time-to-first-byte per request. Long bodies stream past it:
+	// each multipart part is its own request, so large files are unaffected.
+	transport.ResponseHeaderTimeout = timeout
 
 	if opts.endpoint != "" {
 		if opts.skipTLSVerify {
-			transport = &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			}
+			transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 		} else if opts.caCertFile != "" {
 			caCert, err := os.ReadFile(opts.caCertFile)
 			if err != nil {
@@ -136,13 +205,14 @@ func buildHTTPClient(opts clientOptions) (*http.Client, error) {
 			}
 			certPool := x509.NewCertPool()
 			certPool.AppendCertsFromPEM(caCert)
-			transport = &http.Transport{
-				TLSClientConfig: &tls.Config{RootCAs: certPool},
-			}
+			transport.TLSClientConfig = &tls.Config{RootCAs: certPool}
 		}
 	}
 
-	return &http.Client{Transport: transport}, nil
+	// Bounds the whole of one HTTP request (a LIST page, a HEAD, a single
+	// small object, or one multipart part). Whole-object transfers intentionally
+	// carry no total deadline: parts stream for the object's lifetime.
+	return &http.Client{Transport: transport, Timeout: timeout}, nil
 }
 
 func buildLoadOptions(ctx context.Context, opts clientOptions) ([]func(*awsconfig.LoadOptions) error, error) {
@@ -176,13 +246,31 @@ func New(ctx context.Context, cfg cfgpkg.Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Config file values are strictly validated at load time; normalize here
+	// as well so hand-built configs (tests, embeddings) stay on sane ground.
+	threshold := cfg.S3.MultipartThreshold
+	if threshold <= 0 {
+		threshold = defaultMultipartThreshold
+	}
+	chunkSize := cfg.S3.MultipartChunkSize
+	if chunkSize < minUploadPartSize {
+		chunkSize = defaultMultipartChunkSize
+	}
+	partConcurrency := cfg.S3.PartConcurrency
+	if partConcurrency <= 0 {
+		partConcurrency = defaultPartConcurrency
+	}
 	if cfg.Security.DryRun {
 		return &Client{dryRun: true, timeout: timeout, pathStyle: pathStyle}, nil
 	}
 
 	opts := buildClientOptions(cfg)
 
-	httpClient, err := buildHTTPClient(opts)
+	idlePerHost := cfg.Workers*partConcurrency + 8
+	if idlePerHost < 16 {
+		idlePerHost = 16
+	}
+	httpClient, err := buildHTTPClient(opts, timeout, idlePerHost)
 	if err != nil {
 		return nil, fmt.Errorf("build http client: %w", err)
 	}
@@ -207,7 +295,18 @@ func New(ctx context.Context, cfg cfgpkg.Config) (*Client, error) {
 		})
 	}
 
-	return &Client{s3: s3.NewFromConfig(awsCfg, s3Opts...), dryRun: cfg.Security.DryRun, timeout: timeout, pathStyle: pathStyle}, nil
+	s3client := s3.NewFromConfig(awsCfg, s3Opts...)
+	tm := transfermanager.New(s3client, func(o *transfermanager.Options) {
+		o.PartSizeBytes = chunkSize
+		o.MultipartUploadThreshold = threshold
+		o.Concurrency = partConcurrency
+		// Range retrieval works on every object regardless of how it was
+		// uploaded; part-number retrieval requires matching MPU part layouts
+		// and is unreliable on S3-compatible stores.
+		o.GetObjectType = tmtypes.GetObjectRanges
+	})
+
+	return &Client{s3: s3client, tm: tm, dryRun: cfg.Security.DryRun, timeout: timeout, pathStyle: pathStyle, multipartThreshold: threshold}, nil
 }
 
 func (c *Client) UploadFile(bucket string, key string, localPath string) error {
@@ -217,9 +316,9 @@ func (c *Client) UploadFile(bucket string, key string, localPath string) error {
 	if c.dryRun || c.s3 == nil {
 		return nil
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
-	defer cancel()
+	if c.tm == nil {
+		return fmt.Errorf("transfer manager is required")
+	}
 
 	file, err := os.Open(localPath)
 	if err != nil {
@@ -230,11 +329,17 @@ func (c *Client) UploadFile(bucket string, key string, localPath string) error {
 	if err != nil {
 		return fmt.Errorf("stat local file %s: %w", localPath, err)
 	}
-	_, err = c.s3.PutObject(ctx, &s3.PutObjectInput{
+	// No total deadline: large files legitimately stream longer than any
+	// single-request timeout. Each underlying request (single PUT or one
+	// multipart part) is bounded by the HTTP client timeout instead. The
+	// deferred cancel still releases multipart resources on early return.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err = c.tm.UploadObject(ctx, &transfermanager.UploadObjectInput{
 		Bucket: &bucket,
 		Key:    &key,
 		Body:   file,
-		ACL:    types.ObjectCannedACLPrivate,
+		ACL:    tmtypes.ObjectCannedACLPrivate,
 		Metadata: map[string]string{
 			"s3async-modtime-ns": strconv.FormatInt(info.ModTime().UTC().UnixNano(), 10),
 		},

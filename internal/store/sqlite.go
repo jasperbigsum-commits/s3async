@@ -512,92 +512,69 @@ func (r *SQLiteTaskRepository) ResetItemsForRetry(taskID string) error {
 }
 
 func (r *SQLiteTaskRepository) ClaimNextQueued() (task.Task, bool, error) {
-	tx, err := r.db.Begin()
-	if err != nil {
-		return task.Task{}, false, fmt.Errorf("begin claim transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	row := tx.QueryRow(`
-		SELECT id, source, bucket, prefix_value, mode, status,
-		       total_items, pending_items, uploading_items, success_items, failed_items, skipped_items,
-		       total_bytes, pending_bytes, uploading_bytes, success_bytes, failed_bytes, skipped_bytes,
-		       last_error, created_at, updated_at, started_at, completed_at
-		FROM tasks
-		WHERE status = ?
-		ORDER BY created_at ASC
-		LIMIT 1`, string(task.StatusQueued))
+	// Keep selection and claiming in one UPDATE statement. A read-then-update
+	// transaction lets two processes observe the same queued row before either
+	// writer commits; SQLite then reports SQLITE_BUSY or, with a weaker driver,
+	// can make the queue appear to be claimed twice. The conditional UPDATE is
+	// the database-level equivalent of AWS CLI's atomic bounded task claim.
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	row := r.db.QueryRow(`
+		UPDATE tasks
+		SET status = ?,
+		    last_error = '',
+		    updated_at = ?,
+		    started_at = COALESCE(started_at, ?),
+		    completed_at = NULL
+		WHERE id = (
+			SELECT id FROM tasks
+			WHERE status = ?
+			ORDER BY created_at ASC, id ASC
+			LIMIT 1
+		)
+		  AND status = ?
+		RETURNING id, source, bucket, prefix_value, mode, status,
+		          total_items, pending_items, uploading_items, success_items, failed_items, skipped_items,
+		          total_bytes, pending_bytes, uploading_bytes, success_bytes, failed_bytes, skipped_bytes,
+		          last_error, created_at, updated_at, started_at, completed_at`,
+		string(task.StatusRunning), now, now,
+		string(task.StatusQueued), string(task.StatusQueued))
 
 	claimedTask, err := scanTask(row.Scan)
+	if err == sql.ErrNoRows {
+		return task.Task{}, false, nil
+	}
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return task.Task{}, false, nil
-		}
-		return task.Task{}, false, fmt.Errorf("scan queued task: %w", err)
+		return task.Task{}, false, fmt.Errorf("claim queued task: %w", err)
 	}
-
-	now := time.Now().UTC()
-	claimedTask.Status = task.StatusRunning
-	claimedTask.LastError = ""
-	claimedTask.UpdatedAt = now
-	if claimedTask.StartedAt == nil {
-		claimedTask.StartedAt = &now
-	}
-	claimedTask.CompletedAt = nil
-
-	_, err = tx.Exec(`
-		UPDATE tasks
-		SET status = ?, last_error = '', updated_at = ?, started_at = COALESCE(started_at, ?), completed_at = NULL
-		WHERE id = ? AND status = ?`,
-		string(task.StatusRunning),
-		now.Format(time.RFC3339Nano),
-		now.Format(time.RFC3339Nano),
-		claimedTask.ID,
-		string(task.StatusQueued),
-	)
-	if err != nil {
-		return task.Task{}, false, fmt.Errorf("mark queued task running: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return task.Task{}, false, fmt.Errorf("commit claim transaction: %w", err)
-	}
-
 	return claimedTask, true, nil
 }
 
 // ClaimTask atomically changes a task into running state. It prevents a direct
 // task run from racing with the daemon or another CLI process.
 func (r *SQLiteTaskRepository) ClaimTask(id string) (task.Task, bool, error) {
-	tx, err := r.db.Begin()
-	if err != nil {
-		return task.Task{}, false, fmt.Errorf("begin task claim transaction: %w", err)
-	}
-	defer tx.Rollback()
-	row := tx.QueryRow(`SELECT id, source, bucket, prefix_value, mode, status, total_items, pending_items, uploading_items, success_items, failed_items, skipped_items, total_bytes, pending_bytes, uploading_bytes, success_bytes, failed_bytes, skipped_bytes, last_error, created_at, updated_at, started_at, completed_at FROM tasks WHERE id = ? AND status IN (?, ?, ?)`, id, string(task.StatusPending), string(task.StatusQueued), string(task.StatusFailed))
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	row := r.db.QueryRow(`
+		UPDATE tasks
+		SET status = ?,
+		    last_error = '',
+		    updated_at = ?,
+		    started_at = COALESCE(started_at, ?),
+		    completed_at = NULL
+		WHERE id = ?
+		  AND status IN (?, ?, ?)
+		RETURNING id, source, bucket, prefix_value, mode, status,
+		          total_items, pending_items, uploading_items, success_items, failed_items, skipped_items,
+		          total_bytes, pending_bytes, uploading_bytes, success_bytes, failed_bytes, skipped_bytes,
+		          last_error, created_at, updated_at, started_at, completed_at`,
+		string(task.StatusRunning), now, now, id,
+		string(task.StatusPending), string(task.StatusQueued), string(task.StatusFailed))
+
 	claimed, err := scanTask(row.Scan)
 	if err == sql.ErrNoRows {
 		return task.Task{}, false, nil
 	}
 	if err != nil {
-		return task.Task{}, false, fmt.Errorf("scan task to claim: %w", err)
-	}
-	now := time.Now().UTC()
-	claimed.Status = task.StatusRunning
-	claimed.UpdatedAt = now
-	if claimed.StartedAt == nil {
-		claimed.StartedAt = &now
-	}
-	claimed.CompletedAt = nil
-	result, err := tx.Exec(`UPDATE tasks SET status = ?, updated_at = ?, started_at = COALESCE(started_at, ?), completed_at = NULL WHERE id = ? AND status IN (?, ?, ?)`, string(task.StatusRunning), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), id, string(task.StatusPending), string(task.StatusQueued), string(task.StatusFailed))
-	if err != nil {
-		return task.Task{}, false, fmt.Errorf("mark task running: %w", err)
-	}
-	if affected, _ := result.RowsAffected(); affected != 1 {
-		return task.Task{}, false, nil
-	}
-	if err := tx.Commit(); err != nil {
-		return task.Task{}, false, fmt.Errorf("commit task claim: %w", err)
+		return task.Task{}, false, fmt.Errorf("claim task: %w", err)
 	}
 	return claimed, true, nil
 }

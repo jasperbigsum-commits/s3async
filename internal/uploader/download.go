@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/jasperbigsum-commits/s3async/internal/filter"
 	"github.com/jasperbigsum-commits/s3async/internal/task"
@@ -79,14 +80,25 @@ func LocalPathWithStyle(root, relative string, style task.PathStyle) (string, er
 	return current, nil
 }
 
-func (c *Client) PlanDownload(ctx context.Context, bucket, prefix, root string, include, exclude []string, policy CollisionPolicy) ([]task.Item, error) {
-	return c.planDownload(ctx, bucket, prefix, root, include, exclude, false, policy)
+func (c *Client) PlanDownload(ctx context.Context, bucket, prefix, root string, include, exclude []string, policy CollisionPolicy, exactTimestamps ...bool) ([]task.Item, error) {
+	exact := len(exactTimestamps) > 0 && exactTimestamps[0]
+	return c.planDownload(ctx, bucket, prefix, root, include, exclude, false, policy, exact, false, time.Time{}, time.Time{})
 }
 
-// PlanIncrementalDownload skips objects whose local file has the same size and
-// modification time as the S3 object.
-func (c *Client) PlanIncrementalDownload(ctx context.Context, bucket, prefix, root string, include, exclude []string, policy CollisionPolicy) ([]task.Item, error) {
-	return c.planDownload(ctx, bucket, prefix, root, include, exclude, true, policy)
+func (c *Client) PlanDownloadRange(ctx context.Context, bucket, prefix, root string, include, exclude []string, policy CollisionPolicy, from, to time.Time) ([]task.Item, error) {
+	return c.planDownload(ctx, bucket, prefix, root, include, exclude, false, policy, false, false, from, to)
+}
+
+// PlanIncrementalDownload applies AWS CLI style size comparison plus optional
+// directional timestamp comparison; matching full-object checksums take priority.
+func (c *Client) PlanIncrementalDownload(ctx context.Context, bucket, prefix, root string, include, exclude []string, policy CollisionPolicy, exactTimestamps ...bool) ([]task.Item, error) {
+	exact := len(exactTimestamps) > 0 && exactTimestamps[0]
+	return c.planDownload(ctx, bucket, prefix, root, include, exclude, true, policy, exact, false, time.Time{}, time.Time{})
+}
+
+func (c *Client) PlanIncrementalDownloadRange(ctx context.Context, bucket, prefix, root string, include, exclude []string, policy CollisionPolicy, exactTimestamps bool, from, to time.Time, verifyChecksum ...bool) ([]task.Item, error) {
+	verify := len(verifyChecksum) > 0 && verifyChecksum[0]
+	return c.planDownload(ctx, bucket, prefix, root, include, exclude, true, policy, exactTimestamps, verify, from, to)
 }
 
 // CollisionPolicy controls how PlanDownload handles S3 objects that normalize
@@ -102,6 +114,12 @@ const (
 	// Skipped objects never overwrite each other or anything else.
 	CollisionSkip
 )
+
+// SetFilterRules installs ordered include/exclude rules for the next planning
+// call. The client is created per sync command, so the rules are not shared.
+func (c *Client) SetFilterRules(rules []filter.Rule) {
+	c.filterRules = append([]filter.Rule(nil), rules...)
+}
 
 // ParseCollisionPolicy parses the --on-collision flag value.
 func ParseCollisionPolicy(value string) (CollisionPolicy, error) {
@@ -122,7 +140,7 @@ func (p CollisionPolicy) String() string {
 	return "fail"
 }
 
-func (c *Client) planDownload(ctx context.Context, bucket, prefix, root string, include, exclude []string, incremental bool, policy CollisionPolicy) ([]task.Item, error) {
+func (c *Client) planDownload(ctx context.Context, bucket, prefix, root string, include, exclude []string, incremental bool, policy CollisionPolicy, exactTimestamps, verifyChecksum bool, from, to time.Time) ([]task.Item, error) {
 	if c.s3 == nil || bucket == "" {
 		return nil, fmt.Errorf("S3 client and bucket are required to list objects")
 	}
@@ -148,7 +166,17 @@ func (c *Client) planDownload(ctx context.Context, bucket, prefix, root string, 
 				continue
 			}
 			relative := strings.TrimPrefix(key, prefix)
-			if !filter.Match(relative, include, exclude) {
+			matched := filter.Match(relative, include, exclude)
+			if c.filterRules != nil {
+				matched = filter.MatchWithRules(relative, include, c.filterRules)
+			}
+			if !matched {
+				continue
+			}
+			if (!from.IsZero() || !to.IsZero()) && object.LastModified == nil {
+				continue
+			}
+			if object.LastModified != nil && ((!from.IsZero() && object.LastModified.Before(from)) || (!to.IsZero() && object.LastModified.After(to))) {
 				continue
 			}
 			local, err := LocalPathWithStyle(root, relative, c.pathStyle)
@@ -160,13 +188,35 @@ func (c *Client) planDownload(ctx context.Context, bucket, prefix, root string, 
 				item.ModTime = object.LastModified.UTC()
 			}
 			if incremental && object.LastModified != nil {
-				if info, statErr := os.Stat(local); statErr == nil && info.Mode().IsRegular() && info.Size() == item.Size && info.ModTime().UTC().Truncate(time.Second).Equal(object.LastModified.UTC().Truncate(time.Second)) {
-					item.Status = task.ItemStatusSkipped
+				if info, statErr := os.Stat(local); statErr == nil && info.Mode().IsRegular() && info.Size() == item.Size {
+					unchanged, compareErr := c.localMatchesRemote(ctx, bucket, key, local, item.Size, info.ModTime(), *object.LastModified, exactTimestamps, false, verifyChecksum)
+					if compareErr != nil {
+						return nil, fmt.Errorf("compare local file %s with S3 object: %w", relative, compareErr)
+					}
+					if unchanged {
+						item.Status = task.ItemStatusSkipped
+					}
 				}
 			}
 			items = append(items, item)
 		}
 	}
+	// S3 may repeat the exact same key across pages when the bucket is
+	// mutated during a multi-page listing (documented LIST behavior under
+	// concurrent writes; also seen on some S3-compatible stores). Identical
+	// keys name one object, so download it once: later pages reflect newer
+	// bucket state and win over earlier sightings.
+	byKey := make(map[string]int, len(items))
+	deduped := make([]task.Item, 0, len(items))
+	for _, item := range items {
+		if idx, ok := byKey[prefix+item.RelativePath]; ok {
+			deduped[idx] = item
+			continue
+		}
+		byKey[prefix+item.RelativePath] = len(deduped)
+		deduped = append(deduped, item)
+	}
+	items = deduped
 	// Reject file/directory conflicts before starting any downloads.
 	// Items that share a normalized local path are either fatal (fail policy)
 	// or recorded as skipped with the reason (skip policy) so the rest of the
@@ -229,7 +279,7 @@ func markCollisionSkipped(items []task.Item, prefix string, index int, otherRela
 	items[index].Error = fmt.Sprintf("object path collision with %q: both map to local file %q", prefix+otherRelative, items[index].Path)
 }
 
-func (c *Client) DownloadFile(bucket, key, root, relative string) error {
+func (c *Client) DownloadFile(bucket, key, root, relative string, size int64) error {
 	if bucket == "" || key == "" {
 		return fmt.Errorf("bucket and key are required")
 	}
@@ -243,6 +293,15 @@ func (c *Client) DownloadFile(bucket, key, root, relative string) error {
 	if c.s3 == nil {
 		return fmt.Errorf("S3 client is required")
 	}
+	// Small objects stay on one ranged GET: the transfer manager would spend
+	// an extra HEAD per file just to learn the size we already know.
+	if c.tm == nil || size < c.multipartThreshold {
+		return c.downloadSinglePart(bucket, key, root, relative, local)
+	}
+	return c.downloadMultipart(bucket, key, root, relative, local)
+}
+
+func (c *Client) downloadSinglePart(bucket, key, root, relative, local string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
 	response, err := c.s3.GetObject(ctx, &s3.GetObjectInput{Bucket: &bucket, Key: &key})
@@ -250,6 +309,23 @@ func (c *Client) DownloadFile(bucket, key, root, relative string) error {
 		return fmt.Errorf("get object %s: %w", key, err)
 	}
 	defer response.Body.Close()
+	return c.finishDownload(bucket, key, root, relative, local, response.Body, response.ContentLength, response.LastModified)
+}
+
+func (c *Client) downloadMultipart(bucket, key, root, relative, local string) error {
+	// No total deadline: parts stream for the whole object lifetime, each
+	// bounded by the HTTP client timeout. The deferred cancel still releases
+	// background part fetchers if we return before consuming the stream.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out, err := c.tm.GetObject(ctx, &transfermanager.GetObjectInput{Bucket: &bucket, Key: &key})
+	if err != nil {
+		return fmt.Errorf("get object %s: %w", key, err)
+	}
+	return c.finishDownload(bucket, key, root, relative, local, out.Body, out.ContentLength, out.LastModified)
+}
+
+func (c *Client) finishDownload(bucket, key, root, relative, local string, body io.Reader, contentLength *int64, lastModified *time.Time) error {
 	if err := os.MkdirAll(filepath.Dir(local), 0755); err != nil {
 		return err
 	}
@@ -262,12 +338,12 @@ func (c *Client) DownloadFile(bucket, key, root, relative string) error {
 	}
 	defer os.Remove(temp.Name())
 	defer temp.Close()
-	size, err := io.Copy(temp, response.Body)
+	size, err := io.Copy(temp, body)
 	if err != nil {
 		return fmt.Errorf("download %s: %w", key, err)
 	}
-	if response.ContentLength != nil && size != *response.ContentLength {
-		return fmt.Errorf("incomplete download %s: got %d bytes, expected %d", key, size, *response.ContentLength)
+	if contentLength != nil && size != *contentLength {
+		return fmt.Errorf("incomplete download %s: got %d bytes, expected %d", key, size, *contentLength)
 	}
 	if err := temp.Sync(); err != nil {
 		return err
@@ -275,8 +351,8 @@ func (c *Client) DownloadFile(bucket, key, root, relative string) error {
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	if response.LastModified != nil {
-		if err := os.Chtimes(temp.Name(), *response.LastModified, *response.LastModified); err != nil {
+	if lastModified != nil {
+		if err := os.Chtimes(temp.Name(), *lastModified, *lastModified); err != nil {
 			return err
 		}
 	}

@@ -41,7 +41,7 @@ func TestConfiguredDownloadTimeout(t *testing.T) {
 			if err := os.WriteFile(local, []byte("old"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			err = client.DownloadFile("bucket", "a.txt", root, "a.txt")
+			err = client.DownloadFile("bucket", "a.txt", root, "a.txt", 4)
 			want := "data"
 			if timeout < time.Second {
 				want = "old"

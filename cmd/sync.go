@@ -33,18 +33,23 @@ func newSyncCmd() *cobra.Command {
 	var async bool
 	var download bool
 	var incremental bool
+	var force bool
+	var exactTimestamps bool
+	var checksum bool
 	var onCollision string
 	var fromDate, toDate string
 	var timezone string
 	var configPath string
 	var include []string
 	var exclude []string
+	var cliFilterRules []filterRule
 
 	cmd := &cobra.Command{
 		Use:   "sync <local-path>",
 		Short: "Sync local files to S3, or download S3 files with --download",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			useIncremental := incremental && !force
 			var from, to time.Time
 			var err error
 			loc := time.Local
@@ -113,6 +118,20 @@ func newSyncCmd() *cobra.Command {
 			if len(resolvedExclude) == 0 {
 				resolvedExclude = bootstrap.Config.Filters.Exclude
 			}
+			resolvedRules := make([]filter.Rule, 0, len(resolvedInclude)+len(resolvedExclude)+len(cliFilterRules))
+			if !cmd.Flags().Changed("exclude") {
+				for _, pattern := range bootstrap.Config.Filters.Exclude {
+					resolvedRules = append(resolvedRules, filter.Rule{Pattern: pattern})
+				}
+			}
+			if !cmd.Flags().Changed("include") {
+				for _, pattern := range bootstrap.Config.Filters.Include {
+					resolvedRules = append(resolvedRules, filter.Rule{Pattern: pattern, Include: true})
+				}
+			}
+			for _, rule := range cliFilterRules {
+				resolvedRules = append(resolvedRules, filter.Rule{Pattern: rule.pattern, Include: rule.include})
+			}
 			if resolvedBucket == "" {
 				return fmt.Errorf("bucket is required via --bucket, config file, or S3ASYNC_BUCKET")
 			}
@@ -137,10 +156,11 @@ func newSyncCmd() *cobra.Command {
 				if clientErr != nil {
 					return fmt.Errorf("create S3 client: %w", clientErr)
 				}
-				if incremental {
-					items, err = client.PlanIncrementalDownload(cmd.Context(), resolvedBucket, resolvedPrefix, source, resolvedInclude, resolvedExclude, collisionPolicy)
+				client.SetFilterRules(resolvedRules)
+				if useIncremental {
+					items, err = client.PlanIncrementalDownloadRange(cmd.Context(), resolvedBucket, resolvedPrefix, source, resolvedInclude, resolvedExclude, collisionPolicy, exactTimestamps, from, to, checksum)
 				} else {
-					items, err = client.PlanDownload(cmd.Context(), resolvedBucket, resolvedPrefix, source, resolvedInclude, resolvedExclude, collisionPolicy)
+					items, err = client.PlanDownloadRange(cmd.Context(), resolvedBucket, resolvedPrefix, source, resolvedInclude, resolvedExclude, collisionPolicy, from, to)
 				}
 				if err != nil {
 					return fmt.Errorf("plan download: %w", err)
@@ -150,16 +170,6 @@ func newSyncCmd() *cobra.Command {
 						fmt.Fprintf(cmd.OutOrStdout(), "warning: skipped %s: %s\n", item.RelativePath, item.Error)
 					}
 				}
-				if !from.IsZero() || !to.IsZero() {
-					filtered := items[:0]
-					for _, item := range items {
-						if (!from.IsZero() && item.ModTime.Before(from)) || (!to.IsZero() && item.ModTime.After(to)) {
-							continue
-						}
-						filtered = append(filtered, item)
-					}
-					items = filtered
-				}
 				createdTask, err = service.CreateDownloadTask(source, resolvedBucket, resolvedPrefix, async, items)
 			} else {
 				entries, scanErr := scanner.Scan(source)
@@ -167,7 +177,7 @@ func newSyncCmd() *cobra.Command {
 					return fmt.Errorf("scan source: %w", scanErr)
 				}
 				for _, entry := range entries {
-					if !filter.Match(entry.RelativePath, resolvedInclude, resolvedExclude) {
+					if !filter.MatchWithRules(entry.RelativePath, resolvedInclude, resolvedRules) {
 						continue
 					}
 					if (!from.IsZero() && entry.ModTime.Before(from)) || (!to.IsZero() && entry.ModTime.After(to)) {
@@ -175,7 +185,7 @@ func newSyncCmd() *cobra.Command {
 					}
 					items = append(items, task.Item{Path: entry.Path, RelativePath: entry.RelativePath, Size: entry.Size, ModTime: entry.ModTime, Status: task.ItemStatusPending})
 				}
-				if incremental {
+				if useIncremental {
 					cfg := bootstrap.Config
 					cfg.Bucket, cfg.S3.Bucket = resolvedBucket, resolvedBucket
 					cfg.Security.DryRun = false
@@ -183,7 +193,7 @@ func newSyncCmd() *cobra.Command {
 					if clientErr != nil {
 						return fmt.Errorf("create S3 client: %w", clientErr)
 					}
-					items, err = client.PlanIncrementalUpload(cmd.Context(), resolvedBucket, resolvedPrefix, items)
+					items, err = client.PlanIncrementalUpload(cmd.Context(), resolvedBucket, resolvedPrefix, items, checksum)
 					if err != nil {
 						return fmt.Errorf("plan incremental upload: %w", err)
 					}
@@ -247,17 +257,20 @@ func newSyncCmd() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&download, "download", false, "Download S3 prefix into the local directory")
-	cmd.Flags().BoolVar(&incremental, "incremental", false, "Skip unchanged files during upload or download")
+	cmd.Flags().BoolVar(&incremental, "incremental", true, "Skip unchanged files during upload or download (default)")
+	cmd.Flags().BoolVar(&force, "force", false, "Transfer every selected file, including unchanged files")
+	cmd.Flags().BoolVar(&exactTimestamps, "exact-timestamps", false, "For downloads, also compare S3 and local modification timestamps")
+	cmd.Flags().BoolVar(&checksum, "checksum", false, "Compare full-object SHA-256 when the S3 service provides it (adds HEAD requests)")
 	cmd.Flags().StringVar(&onCollision, "on-collision", "fail", "How to handle S3 objects that map to the same local file: fail or skip")
-	cmd.Flags().StringVar(&fromDate, "from", "", "Only sync files modified at or after RFC3339 time (timezone required)")
-	cmd.Flags().StringVar(&toDate, "to", "", "Only sync files modified at or before RFC3339 time (timezone required)")
+	cmd.Flags().StringVar(&fromDate, "from", "", "Only sync files modified at or after this RFC3339 or local date/time")
+	cmd.Flags().StringVar(&toDate, "to", "", "Only sync files modified at or before this RFC3339 or local date/time")
 	cmd.Flags().StringVar(&timezone, "timezone", "Local", "Timezone for date-only --from/--to values (default: local timezone)")
 	cmd.Flags().StringVar(&bucket, "bucket", "", "S3 bucket")
 	cmd.Flags().StringVar(&prefix, "prefix", "", "S3 directory prefix")
 	cmd.Flags().BoolVar(&async, "async", true, "Submit task in async mode")
 	cmd.Flags().StringVar(&configPath, "config", "", "Path to config file")
-	cmd.Flags().StringSliceVar(&include, "include", nil, "Include glob patterns")
-	cmd.Flags().StringSliceVar(&exclude, "exclude", nil, "Exclude glob patterns")
+	cmd.Flags().Var(&orderedPatternFlag{values: &include, rules: &cliFilterRules, include: true}, "include", "Include glob patterns; patterns are applied in command-line order")
+	cmd.Flags().Var(&orderedPatternFlag{values: &exclude, rules: &cliFilterRules}, "exclude", "Exclude glob patterns; patterns are applied in command-line order")
 
 	return cmd
 }
